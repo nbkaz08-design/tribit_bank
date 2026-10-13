@@ -24,9 +24,11 @@ void main() {
   runApp(
     MultiProvider(
       providers: [
-        // 1. База данных: один экземпляр, закрывается при выходе.
+        // 1. База: один экземпляр, закрывается при выходе из приложения.
         Provider<AppDatabase>(
-          create: (_) => AppDatabase(),
+          // Демо-данные только по флагу: flutter run --dart-define=SEED_DEMO=true
+          create: (_) =>
+              AppDatabase(seedDemo: const bool.fromEnvironment('SEED_DEMO')),
           dispose: (_, db) => db.close(),
         ),
 
