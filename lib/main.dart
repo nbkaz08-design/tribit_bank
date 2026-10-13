@@ -53,7 +53,59 @@ void main() {
           create: (c) => LocalLoanRepository(c.read<AppDatabase>()),
         ),
       ],
-      child: const MyApp(),
+      child: const TriBitAppDemo(),
     ),
   );
+}
+
+
+
+class TriBitAppDemo extends StatelessWidget {
+  const TriBitAppDemo({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const MaterialApp(
+      title: 'TriBit bank',
+      home: RatesScreen(),
+    );
+  }
+}
+
+/// Пример экрана «Курсы валют» — работает через репозиторий, не через БД.
+class RatesScreen extends StatelessWidget {
+  const RatesScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final rates = context.read<RatesRepository>();
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Курсы валют')),
+      body: StreamBuilder<List<ExchangeRate>>(
+        stream: rates.watchRates(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Center(child: Text('Ошибка: ${snapshot.error}'));
+          }
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          return ListView(
+            children: [
+              for (final r in snapshot.data!)
+                ListTile(
+                  title: Text('${r.baseCurrency.name.toUpperCase()} → '
+                      '${r.quoteCurrency.name.toUpperCase()}'),
+                  subtitle: Text(
+                    'Покупка: ${(r.buyRateX10000 / 10000).toStringAsFixed(2)}   '
+                    'Продажа: ${(r.sellRateX10000 / 10000).toStringAsFixed(2)}',
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
 }
