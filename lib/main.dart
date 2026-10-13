@@ -1,5 +1,7 @@
+import 'package:bcrypt/bcrypt.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+// ignore: unused_import
 import 'package:tribit_bank/MyApp.dart';
 
 import 'database/app_database.dart';
@@ -80,31 +82,65 @@ class RatesScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final rates = context.read<RatesRepository>();
 
+    final users = context.read<AccountRepository>();
+
+
     return Scaffold(
       appBar: AppBar(title: const Text('Курсы валют')),
-      body: StreamBuilder<List<ExchangeRate>>(
-        stream: rates.watchRates(),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(child: Text('Ошибка: ${snapshot.error}'));
-          }
-          if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          return ListView(
-            children: [
-              for (final r in snapshot.data!)
-                ListTile(
-                  title: Text('${r.baseCurrency.name.toUpperCase()} → '
-                      '${r.quoteCurrency.name.toUpperCase()}'),
-                  subtitle: Text(
-                    'Покупка: ${(r.buyRateX10000 / 10000).toStringAsFixed(2)}   '
-                    'Продажа: ${(r.sellRateX10000 / 10000).toStringAsFixed(2)}',
-                  ),
-                ),
-            ],
-          );
-        },
+      body: Row(
+        children: [
+          Expanded(
+            child: StreamBuilder<List<ExchangeRate>>(
+              stream: rates.watchRates(),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return Center(child: Text('Ошибка: ${snapshot.error}'));
+                }
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                return ListView(
+                  children: [
+                    for (final r in snapshot.data!)
+                      ListTile(
+                        title: Text('${r.baseCurrency.name.toUpperCase()} → '
+                            '${r.quoteCurrency.name.toUpperCase()}'),
+                        subtitle: Text(
+                          'Покупка: ${(r.buyRateX10000 / 10000).toStringAsFixed(2)}   '
+                          'Продажа: ${(r.sellRateX10000 / 10000).toStringAsFixed(2)}',
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+          Expanded(
+            child: FutureBuilder(
+              future: users.getAccountsOfClient(1),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return Center(child: Text('Ошибка: ${snapshot.error}'));
+                }
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                return ListView(
+                  children: [
+                    for (final r in snapshot.data!)
+                      ListTile(
+                        title: Text('id: ${r.clientId} ${r.balance} ${r.currency.name}'),
+                        subtitle: Text(
+                          'opened at: ${r.openedAt}'
+                          '\ncurrent status: ${r.status.name}',
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -7,7 +7,8 @@ import '../app_database.dart';
 ///
 /// ВАЖНО: подставьте сюда то же хэширование, которое использует экран входа,
 /// иначе войти под демо-пользователями не получится.
-const demoPasswordHash = 'demo-hash';
+/// it's a 1234 password
+const demoPasswordHash = r'$2a$10$l3l/bvpEugxbAeblyHgi/.Kr.iR6tEiR.VqlsOSFdP22ERiQ3PFRy';
 
 int _n = 0;
 String _digits(int length) {
