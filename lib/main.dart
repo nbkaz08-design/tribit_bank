@@ -55,93 +55,55 @@ void main() {
           create: (c) => LocalLoanRepository(c.read<AppDatabase>()),
         ),
       ],
-      child: const TriBitAppDemo(),
+      child: const LoginScreen(),
     ),
   );
 }
 
-
-
-class TriBitAppDemo extends StatelessWidget {
-  const TriBitAppDemo({super.key});
-
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
   @override
-  Widget build(BuildContext context) {
-    return const MaterialApp(
-      title: 'TriBit bank',
-      home: RatesScreen(),
-    );
-  }
+  State<LoginScreen> createState() => _LoginScreenState();
 }
 
-/// Пример экрана «Курсы валют» — работает через репозиторий, не через БД.
-class RatesScreen extends StatelessWidget {
-  const RatesScreen({super.key});
+class _LoginScreenState extends State<LoginScreen> {
+  final _login = TextEditingController();
+  final _password = TextEditingController();
+  String? _error;
+
+  Future<void> _submit() async {
+    final auth = context.read<AuthRepository>();
+    final user = await auth.login(_login.text.trim(), _password.text);
+    if (!mounted) return;
+    if (user == null) {
+      setState(() => _error = 'Неверный логин или пароль');
+      return;
+    }
+    // Роль определяет, куда идти дальше.
+    final page = user.role == UserRole.employee
+        ? const Scaffold(body: Center(child: Text('Кабинет сотрудника')))
+        : const Scaffold(body: Center(child: Text('Кабинет клиента')));
+    Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => page));
+  }
 
   @override
-  Widget build(BuildContext context) {
-    final rates = context.read<RatesRepository>();
-
-    final users = context.read<AccountRepository>();
-
-
-    return Scaffold(
-      appBar: AppBar(title: const Text('Курсы валют')),
-      body: Row(
-        children: [
-          Expanded(
-            child: StreamBuilder<List<ExchangeRate>>(
-              stream: rates.watchRates(),
-              builder: (context, snapshot) {
-                if (snapshot.hasError) {
-                  return Center(child: Text('Ошибка: ${snapshot.error}'));
-                }
-                if (!snapshot.hasData) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                return ListView(
-                  children: [
-                    for (final r in snapshot.data!)
-                      ListTile(
-                        title: Text('${r.baseCurrency.name.toUpperCase()} → '
-                            '${r.quoteCurrency.name.toUpperCase()}'),
-                        subtitle: Text(
-                          'Покупка: ${(r.buyRateX10000 / 10000).toStringAsFixed(2)}   '
-                          'Продажа: ${(r.sellRateX10000 / 10000).toStringAsFixed(2)}',
-                        ),
-                      ),
-                  ],
-                );
-              },
-            ),
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Вход в TriBit bank')),
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 320),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(controller: _login,
+                  decoration: const InputDecoration(labelText: 'Логин')),
+              TextField(controller: _password, obscureText: true,
+                  decoration: const InputDecoration(labelText: 'Пароль')),
+              if (_error != null)
+                Padding(padding: const EdgeInsets.only(top: 8),
+                    child: Text(_error!, style: const TextStyle(color: Colors.red))),
+              const SizedBox(height: 16),
+              FilledButton(onPressed: _submit, child: const Text('Войти')),
+            ]),
           ),
-          Expanded(
-            child: FutureBuilder(
-              future: users.getAccountsOfClient(1),
-              builder: (context, snapshot) {
-                if (snapshot.hasError) {
-                  return Center(child: Text('Ошибка: ${snapshot.error}'));
-                }
-                if (!snapshot.hasData) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                return ListView(
-                  children: [
-                    for (final r in snapshot.data!)
-                      ListTile(
-                        title: Text('id: ${r.clientId} ${r.balance} ${r.currency.name}'),
-                        subtitle: Text(
-                          'opened at: ${r.openedAt}'
-                          '\ncurrent status: ${r.status.name}',
-                        ),
-                      ),
-                  ],
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+        ),
+      );
 }
