@@ -1,3 +1,4 @@
+// ignore: unused_import
 import '../database/app_database.dart';
 
 /// Денежные операции клиента.
