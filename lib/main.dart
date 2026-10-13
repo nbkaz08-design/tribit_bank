@@ -55,7 +55,7 @@ void main() {
           create: (c) => LocalLoanRepository(c.read<AppDatabase>()),
         ),
       ],
-      child: const LoginScreen(),
+      child: MaterialApp(home: const LoginScreen()),
     ),
   );
 }
@@ -87,7 +87,11 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
+  Widget build(BuildContext context) {
+    // final db = context.read<AppDatabase>();
+    // db.resetToDemo();
+
+    return Scaffold(
         appBar: AppBar(title: const Text('Вход в TriBit bank')),
         body: Center(
           child: ConstrainedBox(
@@ -106,4 +110,5 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
       );
+  }
 }
