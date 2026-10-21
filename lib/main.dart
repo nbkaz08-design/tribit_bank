@@ -55,38 +55,11 @@ void main() {
           create: (c) => LocalLoanRepository(c.read<AppDatabase>()),
         ),
       ],
-      child: MaterialApp(home: const LoginScreen()),
+      child: MaterialApp(home: const MyApp()),
     ),
   );
 }
 
-<<<<<<< HEAD
-class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
-  @override
-  State<LoginScreen> createState() => _LoginScreenState();
-}
-
-class _LoginScreenState extends State<LoginScreen> {
-  final _login = TextEditingController();
-  final _password = TextEditingController();
-  String? _error;
-
-  Future<void> _submit() async {
-    final auth = context.read<AuthRepository>();
-    final user = await auth.login(_login.text.trim(), _password.text);
-    if (!mounted) return;
-    if (user == null) {
-      setState(() => _error = 'Неверный логин или пароль');
-      return;
-    }
-    // Роль определяет, куда идти дальше.
-    final page = user.role == UserRole.employee
-        ? const Scaffold(body: Center(child: Text('Кабинет сотрудника')))
-        : const Scaffold(body: Center(child: Text('Кабинет клиента')));
-    Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => page));
-  }
-=======
 // ============================================================================
 // ЦВЕТА И ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // ============================================================================
@@ -651,7 +624,6 @@ class SideInfo extends StatelessWidget {
     required this.currentTab,
     required this.onTabChanged,
   });
->>>>>>> 5f2d5c40d7858a6fd0114220828d4ee7c8e32069
 
   bool isSelected(ActiveTab tab) {
     if (tab == ActiveTab.clients) {
@@ -704,31 +676,6 @@ class SideInfo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-<<<<<<< HEAD
-    // final db = context.read<AppDatabase>();
-    // db.resetToDemo();
-
-    return Scaffold(
-        appBar: AppBar(title: const Text('Вход в TriBit bank')),
-        body: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 320),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              TextField(controller: _login,
-                  decoration: const InputDecoration(labelText: 'Логин')),
-              TextField(controller: _password, obscureText: true,
-                  decoration: const InputDecoration(labelText: 'Пароль')),
-              if (_error != null)
-                Padding(padding: const EdgeInsets.only(top: 8),
-                    child: Text(_error!, style: const TextStyle(color: Colors.red))),
-              const SizedBox(height: 16),
-              FilledButton(onPressed: _submit, child: const Text('Войти')),
-            ]),
-          ),
-        ),
-      );
-  }
-=======
     return Container(
       width: 260,
       color: bankDark,
@@ -2875,5 +2822,4 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
   }
->>>>>>> 5f2d5c40d7858a6fd0114220828d4ee7c8e32069
 }
