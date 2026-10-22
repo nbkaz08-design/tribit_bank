@@ -73,16 +73,33 @@ Future<bool> confirmAction(
 // ПРИЛОЖЕНИЕ
 // ============================================================================
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  ThemeMode _themeMode = ThemeMode.light;
+
+  void toggleTheme() {
+    setState(() {
+      _themeMode = _themeMode == ThemeMode.light
+          ? ThemeMode.dark
+          : ThemeMode.light;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'TriBit Bank Portal',
       debugShowCheckedModeBanner: false,
+      themeMode: _themeMode,
       theme: ThemeData(
         useMaterial3: false,
+        brightness: Brightness.light,
         scaffoldBackgroundColor: bankBackground,
         fontFamily: 'Roboto',
         primaryColor: bankBlue,
@@ -104,7 +121,34 @@ class MyApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const MainNavigationScreen(),
+      darkTheme: ThemeData(
+        useMaterial3: false,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: bankDark,
+        fontFamily: 'Roboto',
+        primaryColor: bankBlue,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: bankBlue,
+          brightness: Brightness.dark,
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFF14213D),
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 12,
+            vertical: 14,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(7),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(7),
+            borderSide: const BorderSide(color: Color(0xFF263449)),
+          ),
+        ),
+      ),
+      home: MainNavigationScreen(onToggleTheme: toggleTheme),
     );
   }
 }
@@ -188,7 +232,12 @@ class BankLog {
 // ============================================================================
 
 class MainNavigationScreen extends StatefulWidget {
-  const MainNavigationScreen({super.key});
+  final VoidCallback onToggleTheme;
+
+  const MainNavigationScreen({
+    super.key,
+    required this.onToggleTheme,
+  });
 
   @override
   State<MainNavigationScreen> createState() => _MainNavigationScreenState();
@@ -425,7 +474,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   Widget buildContent() {
     switch (_currentTab) {
       case ActiveTab.auth:
-        return MainAuth(onTabChanged: navigate);
+        return MainAuth(
+          onTabChanged: navigate,
+          onToggleTheme: widget.onToggleTheme,
+        );
 
       case ActiveTab.overview:
         return OverviewScreen(
@@ -527,6 +579,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
             SideInfo(
               currentTab: _currentTab,
               onTabChanged: navigate,
+              onToggleTheme: widget.onToggleTheme,
             ),
           Expanded(
             child: LayoutBuilder(
@@ -562,11 +615,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 class SideInfo extends StatelessWidget {
   final ActiveTab currentTab;
   final ValueChanged<ActiveTab> onTabChanged;
+  final VoidCallback onToggleTheme;
 
   const SideInfo({
     super.key,
     required this.currentTab,
     required this.onTabChanged,
+    required this.onToggleTheme,
   });
 
   bool isSelected(ActiveTab tab) {
@@ -695,6 +750,17 @@ class SideInfo extends StatelessWidget {
                 ),
               ),
               IconButton(
+                tooltip: 'Переключить тему',
+                icon: Icon(
+                  Theme.of(context).brightness == Brightness.light
+                      ? Icons.dark_mode_rounded
+                      : Icons.light_mode_rounded,
+                  color: Colors.grey,
+                  size: 18,
+                ),
+                onPressed: onToggleTheme,
+              ),
+              IconButton(
                 tooltip: 'Выйти',
                 icon: const Icon(
                   Icons.logout_rounded,
@@ -773,10 +839,10 @@ class PageLayout extends StatelessWidget {
               Expanded(
                 child: Text(
                   title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 25,
                     fontWeight: FontWeight.bold,
-                    color: Color(0xFF1E293B),
+                    color: Theme.of(context).colorScheme.onSurface,
                   ),
                 ),
               ),
@@ -809,10 +875,11 @@ class Panel extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Theme.of(context).colorScheme.surface,
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
-          color: borderColor ?? const Color(0xFFEDF1F6),
+          color: borderColor ??
+              Theme.of(context).colorScheme.outlineVariant,
         ),
       ),
       child: Column(
@@ -927,7 +994,10 @@ class InfoLine extends StatelessWidget {
           Expanded(
             child: Text(
               label,
-              style: const TextStyle(fontSize: 12, color: bankGrey),
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
           const SizedBox(width: 16),
@@ -938,7 +1008,7 @@ class InfoLine extends StatelessWidget {
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
-                color: color ?? const Color(0xFF334155),
+                color: color ?? Theme.of(context).colorScheme.onSurface,
               ),
             ),
           ),
@@ -1004,9 +1074,9 @@ class BankTable extends StatelessWidget {
                 color: bankGrey,
                 fontWeight: FontWeight.bold,
               ),
-              dataTextStyle: const TextStyle(
+              dataTextStyle: TextStyle(
                 fontSize: 12,
-                color: Color(0xFF334155),
+                color: Theme.of(context).colorScheme.onSurface,
               ),
               columns: columns
                   .map((text) => DataColumn(label: Text(text)))
@@ -1026,8 +1096,13 @@ class BankTable extends StatelessWidget {
 
 class MainAuth extends StatelessWidget {
   final ValueChanged<ActiveTab> onTabChanged;
+  final VoidCallback onToggleTheme;
 
-  const MainAuth({super.key, required this.onTabChanged});
+  const MainAuth({
+    super.key,
+    required this.onTabChanged,
+    required this.onToggleTheme,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1100,23 +1175,25 @@ class MainAuth extends StatelessWidget {
         ),
         Expanded(
           flex: 5,
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 70,
-                vertical: 35,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text(
-                    'Авторизация сотрудника',
-                    style: TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF1E293B),
-                    ),
+          child: Stack(
+            children: [
+              Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 70,
+                    vertical: 35,
                   ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'Авторизация сотрудника',
+                        style: TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                      ),
                   const SizedBox(height: 10),
                   const Text(
                     'Введите учетные данные для доступа в систему',
@@ -1177,12 +1254,19 @@ class MainAuth extends StatelessWidget {
                                   textAlign: TextAlign.center,
                                   keyboardType: TextInputType.number,
                                   maxLength: 1,
-                                  decoration: const InputDecoration(
+                                  style: TextStyle(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurface,
+                                  ),
+                                  decoration: InputDecoration(
                                     counterText: '',
-                                    contentPadding: EdgeInsets.symmetric(
+                                    contentPadding: const EdgeInsets.symmetric(
                                       vertical: 14,
                                     ),
-                                    fillColor: Colors.white,
+                                    fillColor: Theme.of(context)
+                                        .colorScheme
+                                        .surfaceContainerHighest,
                                   ),
                                 ),
                               ),
@@ -1202,9 +1286,25 @@ class MainAuth extends StatelessWidget {
                     'Демонстрационный вход без проверки учётных данных',
                     style: TextStyle(fontSize: 11, color: bankGrey),
                   ),
-                ],
+                    ],
+                  ),
+                ),
               ),
-            ),
+              Positioned(
+                top: 24,
+                right: 24,
+                child: IconButton(
+                  tooltip: 'Переключить тему',
+                  icon: Icon(
+                    Theme.of(context).brightness == Brightness.light
+                        ? Icons.dark_mode_rounded
+                        : Icons.light_mode_rounded,
+                    color: Theme.of(context).colorScheme.onSurface,
+                  ),
+                  onPressed: onToggleTheme,
+                ),
+              ),
+            ],
           ),
         ),
       ],
