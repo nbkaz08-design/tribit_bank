@@ -1,4 +1,4 @@
-import 'package:bcrypt/bcrypt.dart';
+import 'package:drift/drift.dart' hide Column;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 // ignore: unused_import
@@ -28,9 +28,14 @@ void main() {
       providers: [
         // 1. База: один экземпляр, закрывается при выходе из приложения.
         Provider<AppDatabase>(
-          // Демо-данные только по флагу: flutter run --dart-define=SEED_DEMO=true
-          create: (_) =>
-              AppDatabase(seedDemo: const bool.fromEnvironment('SEED_DEMO')),
+          // Если флаг не передан, база создаётся с демо-данными по умолчанию,
+          // чтобы приложение сразу могло работать через реальные таблицы БД.
+          create: (_) => AppDatabase(
+            seedDemo: const bool.fromEnvironment(
+              'SEED_DEMO',
+              defaultValue: false,
+            ),
+          ),
           dispose: (_, db) => db.close(),
         ),
 
@@ -88,6 +93,13 @@ String dateText(DateTime date) {
 String timeText(DateTime date) {
   String two(int value) => value.toString().padLeft(2, '0');
   return '${dateText(date)} ${two(date.hour)}:${two(date.minute)}';
+}
+
+String cardTail(String rawId) {
+  final digits = rawId.replaceAll(RegExp(r'\D'), '');
+  if (digits.isEmpty) return '0000';
+  if (digits.length <= 4) return digits.padLeft(4, '0');
+  return digits.substring(digits.length - 4);
 }
 
 Color statusColor(String status) {
@@ -253,92 +265,143 @@ class MainNavigationScreen extends StatefulWidget {
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   ActiveTab _currentTab = ActiveTab.auth;
 
-  final clients = <BankClient>[
-    BankClient(
-      id: '842910',
-      name: 'Васильева Елена Сергеевна',
-      initials: 'ЕВ',
-      phone: '+7 (999) •••-45-21',
-      email: 'e.vasileva@example.ru',
-      products: '1 Карта, 1 Кредит',
-      balance: 248560.80,
-      debt: 186420,
-      isPro: true,
-    ),
-    BankClient(
-      id: '842911',
-      name: 'Васильева Анна Игоревна',
-      initials: 'АВ',
-      phone: '+7 (921) •••-12-88',
-      email: 'a.vasileva@example.ru',
-      products: '2 Карты, 1 Кредит',
-      balance: 1042100,
-      debt: 320000,
-    ),
-    BankClient(
-      id: '842912',
-      name: 'Васильева Галина Петровна',
-      initials: 'ГВ',
-      phone: '+7 (905) •••-74-12',
-      email: 'g.vasileva@example.ru',
-      products: '1 Счёт',
-      balance: 12400,
-    ),
-  ];
+  final clients = <BankClient>[];
 
   late BankClient selectedClient;
   late List<CreditApplication> applications;
   CreditApplication? selectedApplication;
 
   final logs = <BankLog>[];
+  String currentEmployeeName = 'Неизвестный сотрудник';
+  String currentEmployeePosition = 'Сотрудник';
 
   int nextApplication = 15;
   bool emailNotifications = true;
   bool applicationNotifications = true;
 
+  BankClient _emptyClient() => BankClient(
+        id: '0',
+        name: 'Нет клиента',
+        initials: '—',
+        phone: '',
+        email: '',
+        products: '0',
+        balance: 0,
+      );
+
+  String _initials(String fullName) {
+    final words = fullName.trim().split(RegExp(r'\s+'));
+    if (words.isEmpty) return '—';
+    if (words.length == 1) return words.first.substring(0, 1).toUpperCase();
+    return '${words.first.substring(0, 1)}${words.last.substring(0, 1)}'
+        .toUpperCase();
+  }
+
+  String _uiStatus(LoanApplicationStatus status) {
+    switch (status) {
+      case LoanApplicationStatus.pending:
+        return 'На рассмотрении';
+      case LoanApplicationStatus.approved:
+        return 'Одобрена';
+      case LoanApplicationStatus.rejected:
+        return 'Отклонена';
+    }
+  }
+
+  Future<void> _loadDbData() async {
+    final db = context.read<AppDatabase>();
+    final clientRows = await db.select(db.clients).get();
+    final mappedClients = <BankClient>[];
+
+    for (final clientRow in clientRows) {
+      final accounts = await (db.select(db.accounts)
+            ..where((a) => a.clientId.equals(clientRow.id)))
+          .get();
+
+      final debtQuery = db.select(db.loans).join([
+        innerJoin(db.accounts, db.accounts.id.equalsExp(db.loans.accountId)),
+      ])
+        ..where(db.accounts.clientId.equals(clientRow.id));
+      final debtRows = await debtQuery.get();
+      final debt = debtRows.fold<int>(0, (sum, row) {
+        final loan = row.readTable(db.loans);
+        return sum + loan.remaining;
+      });
+
+      final balance = accounts.fold<int>(0, (sum, account) => sum + account.balance);
+
+      mappedClients.add(
+        BankClient(
+          id: clientRow.id.toString(),
+          name: clientRow.fullName,
+          initials: _initials(clientRow.fullName),
+          phone: clientRow.phone ?? '+7 (000) •••-••-••',
+          email: clientRow.email ?? 'no-email@tribit.local',
+          products: '${accounts.length} ${accounts.length == 1 ? 'счёт' : 'счёта'}',
+          balance: balance / 100,
+          debt: debt / 100,
+          isPro: false,
+        ),
+      );
+    }
+
+    final applicationRows = await db.select(db.loanApplications).get();
+    final loadedApplications = <CreditApplication>[];
+
+    for (final appRow in applicationRows) {
+      final client = mappedClients.firstWhere(
+        (item) => item.id == appRow.clientId.toString(),
+        orElse: () => _emptyClient(),
+      );
+
+      loadedApplications.add(
+        CreditApplication(
+          id: 'APP-${appRow.id}',
+          client: client,
+          product: appRow.amount >= 1000000 ? 'Автокредит' : 'Потребительский кредит',
+          amount: appRow.amount / 100,
+          months: appRow.termMonths,
+          createdAt: appRow.createdAt,
+          status: _uiStatus(appRow.status),
+        ),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() {
+      clients
+        ..clear()
+        ..addAll(mappedClients);
+      selectedClient = clients.isNotEmpty ? clients.first : _emptyClient();
+      applications = loadedApplications;
+      if (applications.isNotEmpty) {
+        selectedApplication = applications.first;
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
+    selectedClient = _emptyClient();
+    applications = [];
+    _loadDbData();
+  }
 
-    selectedClient = clients.first;
-
-    applications = [
-      CreditApplication(
-        id: 'APP-2024-014',
-        client: clients[0],
-        product: 'Потребительский кредит',
-        amount: 450000,
-        months: 36,
-        createdAt: DateTime(2024, 10, 24, 10, 15),
-      ),
-      CreditApplication(
-        id: 'APP-2024-013',
-        client: clients[1],
-        product: 'Автокредит',
-        amount: 1200000,
-        months: 60,
-        createdAt: DateTime(2024, 10, 24, 9, 40),
-        status: 'Одобрена',
-      ),
-      CreditApplication(
-        id: 'APP-2024-012',
-        client: clients[2],
-        product: 'Потребительский кредит',
-        amount: 300000,
-        months: 24,
-        createdAt: DateTime(2024, 10, 23, 16, 20),
-        status: 'Отклонена',
-      ),
-    ];
+  void setCurrentEmployee(String name, String position) {
+    setState(() {
+      currentEmployeeName = name;
+      currentEmployeePosition = position;
+    });
   }
 
   void navigate(ActiveTab tab) {
     setState(() {
       if (_currentTab == ActiveTab.auth && tab != ActiveTab.auth) {
-        addLog('Вход в систему', 'Константин В.');
+        addLog('Вход в систему', currentEmployeeName);
       }
       if (tab == ActiveTab.auth) {
-        addLog('Выход из системы', 'Константин В.');
+        addLog('Выход из системы', currentEmployeeName);
       }
       _currentTab = tab;
     });
@@ -432,7 +495,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     final confirmed = await confirmAction(
       context,
       '$action карту?',
-      '${client.name}\nКарта •••• ${client.id.substring(2)}',
+      '${client.name}\nКарта •••• ${cardTail(client.id)}',
     );
 
     if (!confirmed || !mounted) return;
@@ -481,7 +544,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   Widget buildContent() {
     switch (_currentTab) {
       case ActiveTab.auth:
-        return MainAuth(onTabChanged: navigate);
+        return MainAuth(
+          onTabChanged: navigate,
+          onEmployeeLoggedIn: (name) => setCurrentEmployee(name, 'Сотрудник'),
+          onEmployeePositionLoggedIn: (position) {
+            setState(() => currentEmployeePosition = position);
+          },
+        );
 
       case ActiveTab.overview:
         return OverviewScreen(
@@ -539,6 +608,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
         return CreditApplicationDetailsScreen(
           application: application,
+          employeeName: currentEmployeeName,
           onBack: () => navigate(ActiveTab.creditApplications),
           onApprove: () => changeApplicationStatus('Одобрена'),
           onReject: () => changeApplicationStatus('Отклонена'),
@@ -556,10 +626,15 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         );
 
       case ActiveTab.actionLog:
-        return ActionLogScreen(logs: logs);
+        return ActionLogScreen(
+          logs: logs,
+          employeeName: currentEmployeeName,
+        );
 
       case ActiveTab.settings:
         return SettingsScreen(
+          employeeName: currentEmployeeName,
+          employeePosition: currentEmployeePosition,
           emailNotifications: emailNotifications,
           applicationNotifications: applicationNotifications,
           onSave: (email, application) {
@@ -582,6 +657,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           if (_currentTab != ActiveTab.auth)
             SideInfo(
               currentTab: _currentTab,
+              employeeName: currentEmployeeName,
+              employeePosition: currentEmployeePosition,
               onTabChanged: navigate,
             ),
           Expanded(
@@ -617,13 +694,25 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
 class SideInfo extends StatelessWidget {
   final ActiveTab currentTab;
+  final String employeeName;
+  final String employeePosition;
   final ValueChanged<ActiveTab> onTabChanged;
 
   const SideInfo({
     super.key,
     required this.currentTab,
+    required this.employeeName,
+    required this.employeePosition,
     required this.onTabChanged,
   });
+
+  String _initials(String fullName) {
+    final words = fullName.trim().split(RegExp(r'\s+'));
+    if (words.isEmpty || words.first.isEmpty) return '—';
+    if (words.length == 1) return words.first.substring(0, 1).toUpperCase();
+    return '${words.first.substring(0, 1)}${words.last.substring(0, 1)}'
+        .toUpperCase();
+  }
 
   bool isSelected(ActiveTab tab) {
     if (tab == ActiveTab.clients) {
@@ -725,12 +814,12 @@ class SideInfo extends StatelessWidget {
           const Divider(color: Color(0xFF263449)),
           Row(
             children: [
-              const CircleAvatar(
+              CircleAvatar(
                 radius: 18,
                 backgroundColor: Colors.blueGrey,
                 child: Text(
-                  'КВ',
-                  style: TextStyle(color: Colors.white, fontSize: 12),
+                  _initials(employeeName),
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
                 ),
               ),
               const SizedBox(width: 10),
@@ -738,13 +827,13 @@ class SideInfo extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Константин В.',
-                      style: TextStyle(color: Colors.white, fontSize: 12),
+                    Text(
+                      employeeName,
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Старший андеррайтер',
+                      employeePosition,
                       style: TextStyle(color: Colors.grey[500], fontSize: 10),
                     ),
                   ],
@@ -1080,10 +1169,74 @@ class BankTable extends StatelessWidget {
 // АВТОРИЗАЦИЯ
 // ============================================================================
 
-class MainAuth extends StatelessWidget {
+class MainAuth extends StatefulWidget {
   final ValueChanged<ActiveTab> onTabChanged;
+  final ValueChanged<String> onEmployeeLoggedIn;
+  final ValueChanged<String> onEmployeePositionLoggedIn;
 
-  const MainAuth({super.key, required this.onTabChanged});
+  const MainAuth({
+    super.key,
+    required this.onTabChanged,
+    required this.onEmployeeLoggedIn,
+    required this.onEmployeePositionLoggedIn,
+  });
+
+  @override
+  State<MainAuth> createState() => _MainAuthState();
+}
+
+class _MainAuthState extends State<MainAuth> {
+  final _loginController = TextEditingController(text: 'admin');
+  final _passwordController = TextEditingController(text: 'password');
+  bool _isLoading = false;
+
+  Future<void> _login() async {
+    final login = _loginController.text.trim();
+    final password = _passwordController.text.trim();
+
+    if (login.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Введите логин и пароль')),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      final authRepo = context.read<AuthRepository>();
+      final user = await authRepo.login(login, password);
+      if (!mounted) return;
+
+      if (user == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Неверный логин или пароль')),
+        );
+        return;
+      }
+
+      final employee = await authRepo.getEmployeeByUserId(user.id);
+      widget.onEmployeeLoggedIn(employee?.fullName ?? user.login);
+      widget.onEmployeePositionLoggedIn(employee?.position ?? 'Сотрудник');
+      widget.onTabChanged(ActiveTab.overview);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка авторизации: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _loginController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1179,15 +1332,20 @@ class MainAuth extends StatelessWidget {
                     style: TextStyle(color: bankGrey, fontSize: 14),
                   ),
                   const SizedBox(height: 32),
-                  const FieldLabel(
-                    label: 'Корпоративный ID / E-mail',
-                    child: TextFormFieldEmail(),
+                  FieldLabel(
+                    label: 'Логин',
+                    child: TextFormField(
+                      controller: _loginController,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.person_outline, size: 20),
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 18),
                   FieldLabel(
                     label: 'Пароль',
                     child: TextFormField(
-                      initialValue: 'demo-password',
+                      controller: _passwordController,
                       obscureText: true,
                       decoration: const InputDecoration(
                         prefixIcon: Icon(Icons.lock_outline, size: 20),
@@ -1250,8 +1408,8 @@ class MainAuth extends StatelessWidget {
                   ),
                   const SizedBox(height: 28),
                   BankButton(
-                    'Подтвердить и войти',
-                    onPressed: () => onTabChanged(ActiveTab.overview),
+                    _isLoading ? 'Входим...' : 'Подтвердить и войти',
+                    onPressed: _isLoading ? null : _login,
                   ),
                   const SizedBox(height: 12),
                   const Text(
@@ -1863,7 +2021,7 @@ class AccountsCardsScreen extends StatelessWidget {
                       ),
                       const Spacer(),
                       Text(
-                        '••••  ••••  ••••  ${client.id.substring(2)}',
+                        '••••  ••••  ••••  ${cardTail(client.id)}',
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 22,
@@ -2316,6 +2474,7 @@ class _CreateCreditApplicationScreenState
 
 class CreditApplicationDetailsScreen extends StatelessWidget {
   final CreditApplication application;
+  final String employeeName;
   final VoidCallback onBack;
   final VoidCallback onApprove;
   final VoidCallback onReject;
@@ -2323,6 +2482,7 @@ class CreditApplicationDetailsScreen extends StatelessWidget {
   const CreditApplicationDetailsScreen({
     super.key,
     required this.application,
+    required this.employeeName,
     required this.onBack,
     required this.onApprove,
     required this.onReject,
@@ -2357,7 +2517,7 @@ class CreditApplicationDetailsScreen extends StatelessWidget {
                   InfoLine('Сумма кредита', money(application.amount)),
                   InfoLine('Срок', '${application.months} месяцев'),
                   InfoLine('Дата создания', timeText(application.createdAt)),
-                  const InfoLine('Ответственный', 'Константин В.'),
+                  InfoLine('Ответственный', employeeName),
                   const Divider(height: 32),
                   const Text(
                     'Решение по заявке',
@@ -2646,8 +2806,13 @@ class _CreditRepaymentScreenState extends State<CreditRepaymentScreen> {
 
 class ActionLogScreen extends StatefulWidget {
   final List<BankLog> logs;
+  final String employeeName;
 
-  const ActionLogScreen({super.key, required this.logs});
+  const ActionLogScreen({
+    super.key,
+    required this.logs,
+    required this.employeeName,
+  });
 
   @override
   State<ActionLogScreen> createState() => _ActionLogScreenState();
@@ -2690,7 +2855,7 @@ class _ActionLogScreenState extends State<ActionLogScreen> {
                 return DataRow(
                   cells: [
                     DataCell(Text(timeText(log.date))),
-                    const DataCell(Text('Константин В.')),
+                    DataCell(Text(widget.employeeName)),
                     DataCell(Text(log.action)),
                     DataCell(Text(log.object)),
                     const DataCell(StatusBadge('Успешно')),
@@ -2715,12 +2880,16 @@ class _ActionLogScreenState extends State<ActionLogScreen> {
 // ============================================================================
 
 class SettingsScreen extends StatefulWidget {
+  final String employeeName;
+  final String employeePosition;
   final bool emailNotifications;
   final bool applicationNotifications;
   final void Function(bool email, bool applications) onSave;
 
   const SettingsScreen({
     super.key,
+    required this.employeeName,
+    required this.employeePosition,
     required this.emailNotifications,
     required this.applicationNotifications,
     required this.onSave,
@@ -2739,6 +2908,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     emailNotifications = widget.emailNotifications;
     applicationNotifications = widget.applicationNotifications;
+  }
+
+  String _initials(String fullName) {
+    final words = fullName.trim().split(RegExp(r'\s+'));
+    if (words.isEmpty || words.first.isEmpty) return '—';
+    if (words.length == 1) return words.first.substring(0, 1).toUpperCase();
+    return '${words.first.substring(0, 1)}${words.last.substring(0, 1)}'
+        .toUpperCase();
   }
 
   @override
@@ -2798,22 +2975,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           const SizedBox(width: 20),
-          const Expanded(
+          Expanded(
             child: Panel(
               title: 'Профиль сотрудника',
               child: Column(
                 children: [
                   CircleAvatar(
                     radius: 30,
-                    backgroundColor: Color(0xFFEFF6FF),
-                    child: Text('КВ', style: TextStyle(color: bankBlue)),
+                    backgroundColor: const Color(0xFFEFF6FF),
+                    child: Text(
+                      _initials(widget.employeeName),
+                      style: const TextStyle(color: bankBlue),
+                    ),
                   ),
-                  SizedBox(height: 20),
-                  InfoLine('Сотрудник', 'Константин В.'),
-                  InfoLine('Должность', 'Старший андеррайтер'),
-                  InfoLine('E-mail', 'k.vorobiev@tribit.ru'),
-                  InfoLine('Язык', 'Русский'),
-                  InfoLine('Режим', 'Демонстрационный'),
+                  const SizedBox(height: 20),
+                  InfoLine('Сотрудник', widget.employeeName),
+                  InfoLine('Должность', widget.employeePosition),
+                  const InfoLine('E-mail', 'k.vorobiev@tribit.ru'),
+                  const InfoLine('Язык', 'Русский'),
+                  const InfoLine('Режим', 'Демонстрационный'),
                 ],
               ),
             ),
