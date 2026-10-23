@@ -54,6 +54,10 @@ class AppDatabase extends _$AppDatabase {
     },
     beforeOpen: (details) async {
       await customStatement('PRAGMA foreign_keys = ON');
+      //добавил
+      if (seedDemo) {
+        await seedDemoData();
+      }    
     },
   );
 

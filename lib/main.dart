@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart' hide Column;
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
 import 'package:provider/provider.dart';
 // ignore: unused_import
 import 'package:tribit_bank/MyApp.dart';
@@ -20,8 +21,10 @@ import 'repositories/local/local_loan_repository.dart';
 import 'repositories/local/local_payment_repository.dart';
 import 'repositories/local/local_rates_repository.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await windowManager.ensureInitialized();
+  await windowManager.setMinimumSize(const Size(1000, 650));
 
   runApp(
     MultiProvider(
@@ -141,14 +144,73 @@ Future<bool> confirmAction(
 // ПРИЛОЖЕНИЕ
 // ============================================================================
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  ThemeMode _themeMode = ThemeMode.light;
+
+  void _toggleTheme() {
+    setState(() {
+      _themeMode = _themeMode == ThemeMode.light
+          ? ThemeMode.dark : ThemeMode.light;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'TriBit Bank Portal',
       debugShowCheckedModeBanner: false,
+      themeMode: _themeMode,
+      darkTheme: ThemeData(
+        useMaterial3: false,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: bankDark,
+        fontFamily: 'Roboto',
+        primaryColor: bankBlue,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: bankBlue,
+          brightness: Brightness.dark,
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFF14213D),
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(7)),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(7),
+            borderSide: const BorderSide(color: Color(0xFF263449)),
+          ),
+        ),
+      ),
+      builder: (context, child) => Stack(
+        children: [
+          child ?? const SizedBox.shrink(),
+          Positioned(
+            top: 16,
+            right: 16,
+            child: Material(
+              color: Theme.of(context).colorScheme.surface,
+              shape: const CircleBorder(),
+              child: IconButton(
+                tooltip: 'Переключить тему',
+                onPressed: _toggleTheme,
+                icon: Icon(
+                  Theme.of(context).brightness == Brightness.dark
+                      ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
       theme: ThemeData(
         useMaterial3: false,
         scaffoldBackgroundColor: bankBackground,
@@ -263,6 +325,14 @@ class MainNavigationScreen extends StatefulWidget {
 }
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
+  final ScrollController _desktopHorizontalScroll = ScrollController();
+
+  @override
+  void dispose() {
+    _desktopHorizontalScroll.dispose();
+    super.dispose();
+  }
+
   ActiveTab _currentTab = ActiveTab.auth;
 
   final clients = <BankClient>[];
@@ -671,12 +741,21 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
                     ? minimumWidth
                     : constraints.maxWidth;
 
-                return SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: SizedBox(
-                    width: width,
-                    height: constraints.maxHeight,
-                    child: buildContent(),
+                return Scrollbar(
+                  controller: _desktopHorizontalScroll,
+                  thumbVisibility: constraints.maxWidth < minimumWidth,
+                  trackVisibility: constraints.maxWidth < minimumWidth,
+                  interactive: true,
+                  scrollbarOrientation: ScrollbarOrientation.bottom,
+                  notificationPredicate: (notification) => notification.depth == 0,
+                  child: SingleChildScrollView(
+                    controller: _desktopHorizontalScroll,
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: width,
+                      height: constraints.maxHeight,
+                      child: buildContent(),
+                    ),
                   ),
                 );
               },
@@ -918,10 +997,10 @@ class PageLayout extends StatelessWidget {
               Expanded(
                 child: Text(
                   title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 25,
                     fontWeight: FontWeight.bold,
-                    color: Color(0xFF1E293B),
+                    color: Theme.of(context).colorScheme.onSurface,
                   ),
                 ),
               ),
@@ -954,10 +1033,10 @@ class Panel extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Theme.of(context).colorScheme.surface,
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
-          color: borderColor ?? const Color(0xFFEDF1F6),
+          color: borderColor ?? Theme.of(context).colorScheme.outlineVariant,
         ),
       ),
       child: Column(
@@ -966,7 +1045,7 @@ class Panel extends StatelessWidget {
           if (title != null) ...[
             Text(
               title!,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.bold,
               ),
@@ -1083,7 +1162,7 @@ class InfoLine extends StatelessWidget {
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
-                color: color ?? const Color(0xFF334155),
+                color: color ?? Theme.of(context).colorScheme.onSurface,
               ),
             ),
           ),
@@ -1149,9 +1228,9 @@ class BankTable extends StatelessWidget {
                 color: bankGrey,
                 fontWeight: FontWeight.bold,
               ),
-              dataTextStyle: const TextStyle(
+              dataTextStyle: TextStyle(
                 fontSize: 12,
-                color: Color(0xFF334155),
+                color: Theme.of(context).colorScheme.onSurface,
               ),
               columns: columns
                   .map((text) => DataColumn(label: Text(text)))
@@ -1318,12 +1397,12 @@ class _MainAuthState extends State<MainAuth> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text(
+                  Text(
                     'Авторизация сотрудника',
                     style: TextStyle(
                       fontSize: 28,
                       fontWeight: FontWeight.bold,
-                      color: Color(0xFF1E293B),
+                      color: Theme.of(context).colorScheme.onSurface,
                     ),
                   ),
                   const SizedBox(height: 10),
@@ -1388,6 +1467,8 @@ class _MainAuthState extends State<MainAuth> {
                                 ),
                                 child: TextFormField(
                                   initialValue: '482910'[index],
+                                  style: const TextStyle(color: Colors.black),
+                                  cursorColor: bankBlue,
                                   textAlign: TextAlign.center,
                                   keyboardType: TextInputType.number,
                                   maxLength: 1,

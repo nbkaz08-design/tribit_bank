@@ -56,7 +56,7 @@ Future<void> insertDemoData(AppDatabase db) => db.transaction(() async {
       final maria = await client('maria', 'Сидорова Мария Олеговна', '+79004445566');
       final oleg = await client('oleg', 'Кузнецов Олег Дмитриевич', '+79007778899');
 
-      // ── Счета ──
+      //Счета
       Future<int> account(int clientId, Currency cur, int balance,
               {AccountType type = AccountType.current}) =>
           db.into(db.accounts).insert(AccountsCompanion.insert(
