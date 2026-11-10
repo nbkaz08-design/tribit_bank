@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:ui' show instantiateImageCodec;
+import 'package:bcrypt/bcrypt.dart';
 import 'package:drift/drift.dart' hide Column;
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
@@ -23,6 +27,7 @@ import 'repositories/local/local_rates_repository.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await workplace.load();
   await windowManager.ensureInitialized();
   await windowManager.setMinimumSize(const Size(1000, 650));
 
@@ -152,7 +157,13 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  ThemeMode _themeMode = ThemeMode.light;
+  ThemeMode get _themeMode => workplace.theme;
+  set _themeMode(ThemeMode value) { workplace.theme = value; workplace.save(); }
+  void refreshAppearance() { if (mounted) setState(() {}); }
+  @override
+  void initState() { super.initState(); workplace.addListener(refreshAppearance); }
+  @override
+  void dispose() { workplace.removeListener(refreshAppearance); super.dispose(); }
 
   void _toggleTheme() {
     setState(() {
@@ -172,9 +183,9 @@ class _MyAppState extends State<MyApp> {
         brightness: Brightness.dark,
         scaffoldBackgroundColor: bankDark,
         fontFamily: 'Roboto',
-        primaryColor: bankBlue,
+        primaryColor: workplace.accent,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: bankBlue,
+          seedColor: workplace.accent,
           brightness: Brightness.dark,
         ),
         inputDecorationTheme: InputDecorationTheme(
@@ -215,8 +226,8 @@ class _MyAppState extends State<MyApp> {
         useMaterial3: false,
         scaffoldBackgroundColor: bankBackground,
         fontFamily: 'Roboto',
-        primaryColor: bankBlue,
-        colorScheme: ColorScheme.fromSeed(seedColor: bankBlue),
+        primaryColor: workplace.accent,
+        colorScheme: ColorScheme.fromSeed(seedColor: workplace.accent),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
           fillColor: const Color(0xFFF8FAFC),
@@ -466,6 +477,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 
   void navigate(ActiveTab tab) {
+    if (tab == ActiveTab.createCreditApplication) {
+      message('Сотрудник не может создавать кредитные заявки');
+      return;
+    }
     setState(() {
       if (_currentTab == ActiveTab.auth && tab != ActiveTab.auth) {
         addLog('Вход в систему', currentEmployeeName);
@@ -501,36 +516,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       selectedClient = application.client;
       _currentTab = ActiveTab.creditApplicationDetails;
     });
-  }
-
-  void createApplication(
-    BankClient client,
-    String product,
-    double amount,
-    int months,
-  ) {
-    final now = DateTime.now();
-
-    final application = CreditApplication(
-      id: 'APP-${now.year}-'
-          '${nextApplication.toString().padLeft(3, '0')}',
-      client: client,
-      product: product,
-      amount: amount,
-      months: months,
-      createdAt: now,
-    );
-
-    setState(() {
-      nextApplication++;
-      applications.insert(0, application);
-      selectedApplication = application;
-      selectedClient = client;
-      addLog('Создание заявки', application.id);
-      _currentTab = ActiveTab.creditApplicationDetails;
-    });
-
-    message('Заявка создана');
   }
 
   Future<void> changeApplicationStatus(String status) async {
@@ -624,9 +609,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
       case ActiveTab.overview:
         return OverviewScreen(
-          onCreateApplication: () => navigate(
-            ActiveTab.createCreditApplication,
-          ),
           onClients: () => navigate(ActiveTab.clients),
           onAccounts: () => navigate(ActiveTab.accounts),
         );
@@ -641,15 +623,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         return ClientDetailsScreen(
           client: selectedClient,
           onBack: () => navigate(ActiveTab.clients),
-          onCreateApplication: () => navigate(
-            ActiveTab.createCreditApplication,
-          ),
           onAccounts: () => navigate(ActiveTab.accounts),
-          onRepayment: () => navigate(ActiveTab.creditRepayment),
         );
 
       case ActiveTab.accounts:
         return AccountsCardsScreen(
+          clients: clients,
+          onClientChanged: (client) => setState(() => selectedClient = client),
           client: selectedClient,
           onToggleCard: toggleCard,
         );
@@ -658,15 +638,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         return CreditApplicationsScreen(
           applications: applications,
           onOpen: openApplication,
-          onCreate: () => navigate(ActiveTab.createCreditApplication),
         );
 
       case ActiveTab.createCreditApplication:
-        return CreateCreditApplicationScreen(
-          clients: clients,
-          initialClient: selectedClient,
-          onSubmit: createApplication,
-          onBack: () => navigate(ActiveTab.creditApplications),
+        return const Center(
+          child: Text('Создание кредитной заявки сотрудником недоступно'),
         );
 
       case ActiveTab.creditApplicationDetails:
@@ -1294,6 +1270,11 @@ class _MainAuthState extends State<MainAuth> {
         return;
       }
 
+      workplace.userId = user.id;
+      workplace.login = user.login;
+      workplace.event('Вход в приложение');
+      try { await workplace.save(); } catch (_) {}
+      if (!mounted) return;
       final employee = await authRepo.getEmployeeByUserId(user.id);
       widget.onEmployeeLoggedIn(employee?.fullName ?? user.login);
       widget.onEmployeePositionLoggedIn(employee?.position ?? 'Сотрудник');
@@ -1526,13 +1507,11 @@ class TextFormFieldEmail extends StatelessWidget {
 // ============================================================================
 
 class OverviewScreen extends StatelessWidget {
-  final VoidCallback onCreateApplication;
   final VoidCallback onClients;
   final VoidCallback onAccounts;
 
   const OverviewScreen({
     super.key,
-    required this.onCreateApplication,
     required this.onClients,
     required this.onAccounts,
   });
@@ -1617,11 +1596,6 @@ class OverviewScreen extends StatelessWidget {
                         'Открыть базу клиентов',
                         outlined: true,
                         onPressed: onClients,
-                      ),
-                      const SizedBox(height: 12),
-                      BankButton(
-                        'Создать заявку на кредит',
-                        onPressed: onCreateApplication,
                       ),
                       const SizedBox(height: 12),
                       BankButton(
@@ -1893,17 +1867,13 @@ class _ClientsScreenState extends State<ClientsScreen> {
 class ClientDetailsScreen extends StatelessWidget {
   final BankClient client;
   final VoidCallback onBack;
-  final VoidCallback onCreateApplication;
   final VoidCallback onAccounts;
-  final VoidCallback onRepayment;
 
   const ClientDetailsScreen({
     super.key,
     required this.client,
     required this.onBack,
-    required this.onCreateApplication,
     required this.onAccounts,
-    required this.onRepayment,
   });
 
   @override
@@ -2007,20 +1977,9 @@ class ClientDetailsScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       BankButton(
-                        'Новая заявка на кредит',
-                        onPressed: onCreateApplication,
-                      ),
-                      const SizedBox(height: 12),
-                      BankButton(
                         'Счета и карты',
                         outlined: true,
                         onPressed: onAccounts,
-                      ),
-                      const SizedBox(height: 12),
-                      BankButton(
-                        'Погашение кредита',
-                        outlined: true,
-                        onPressed: onRepayment,
                       ),
                     ],
                   ),
@@ -2039,21 +1998,36 @@ class ClientDetailsScreen extends StatelessWidget {
 // ============================================================================
 
 class AccountsCardsScreen extends StatelessWidget {
+  final List<BankClient> clients;
+  final ValueChanged<BankClient> onClientChanged;
   final BankClient client;
   final VoidCallback onToggleCard;
 
   const AccountsCardsScreen({
     super.key,
+    required this.clients,
+    required this.onClientChanged,
     required this.client,
     required this.onToggleCard,
   });
 
   @override
   Widget build(BuildContext context) {
+    if (clients.isEmpty) {
+      return const PageLayout(title: 'Счета и карты',
+        child: Panel(child: Text('Клиенты ещё не загружены или отсутствуют.')));
+    }
+    final ids = clients.map((c) => c.id).toList()..sort();
+    final rank = ids.indexOf(client.id);
+    final style = (rank < 0 ? 0 : rank) % 3;
+    final cardName = ['Classic', 'Aurora', 'Black Gold'][style];
     return PageLayout(
       title: 'Счета и карты',
       child: Column(
         children: [
+          ClientSearchPanel(clients: clients, selectedClient: client,
+            onSelected: onClientChanged),
+          const SizedBox(height: 20),
           Panel(
             title: client.name,
             child: BankTable(
@@ -2077,58 +2051,7 @@ class AccountsCardsScreen extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(
-                  width: 310,
-                  height: 185,
-                  padding: const EdgeInsets.all(22),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: client.cardBlocked
-                          ? const [Color(0xFF64748B), Color(0xFF1E293B)]
-                          : const [Color(0xFF2563EB), Color(0xFF10234B)],
-                    ),
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'TriBit Bank',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 17,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const Spacer(),
-                      Text(
-                        '••••  ••••  ••••  ${cardTail(client.id)}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          letterSpacing: 2,
-                        ),
-                      ),
-                      const SizedBox(height: 18),
-                      const Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '08/29',
-                            style: TextStyle(color: Colors.white70),
-                          ),
-                          Text(
-                            'МИР',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
+                ClientCardArtwork(client: client, style: style),
                 const SizedBox(width: 28),
                 Expanded(
                   child: Column(
@@ -2139,7 +2062,7 @@ class AccountsCardsScreen extends StatelessWidget {
                       ),
                       const SizedBox(height: 12),
                       InfoLine('Держатель', client.name),
-                      const InfoLine('Тип карты', 'MIR Classic'),
+                      InfoLine('Оформление карты', 'MIR $cardName'),
                       const InfoLine('Срок действия', '08/29'),
                       const SizedBox(height: 12),
                       BankButton(
@@ -2169,13 +2092,11 @@ class AccountsCardsScreen extends StatelessWidget {
 class CreditApplicationsScreen extends StatefulWidget {
   final List<CreditApplication> applications;
   final ValueChanged<CreditApplication> onOpen;
-  final VoidCallback onCreate;
 
   const CreditApplicationsScreen({
     super.key,
     required this.applications,
     required this.onOpen,
-    required this.onCreate,
   });
 
   @override
@@ -2199,10 +2120,6 @@ class _CreditApplicationsScreenState
 
     return PageLayout(
       title: 'Управление кредитными заявками',
-      action: BankButton(
-        '＋ Создать заявку',
-        onPressed: widget.onCreate,
-      ),
       child: Panel(
         child: Column(
           children: [
@@ -2604,16 +2521,6 @@ class CreditApplicationDetailsScreen extends StatelessWidget {
                     'Решение по заявке',
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Одобрение изменяет только статус демонстрационной '
-                    'заявки. Выдача денег не выполняется.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: bankGrey,
-                      height: 1.6,
-                    ),
-                  ),
                   const SizedBox(height: 24),
                   Row(
                     children: [
@@ -2966,16 +2873,9 @@ class SettingsScreen extends StatefulWidget {
   final bool emailNotifications;
   final bool applicationNotifications;
   final void Function(bool email, bool applications) onSave;
-
-  const SettingsScreen({
-    super.key,
-    required this.employeeName,
-    required this.employeePosition,
-    required this.emailNotifications,
-    required this.applicationNotifications,
-    required this.onSave,
-  });
-
+  const SettingsScreen({super.key, required this.employeeName,
+    required this.employeePosition, required this.emailNotifications,
+    required this.applicationNotifications, required this.onSave});
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
@@ -2983,7 +2883,6 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   late bool emailNotifications;
   late bool applicationNotifications;
-
   @override
   void initState() {
     super.initState();
@@ -2991,96 +2890,632 @@ class _SettingsScreenState extends State<SettingsScreen> {
     applicationNotifications = widget.applicationNotifications;
   }
 
-  String _initials(String fullName) {
-    final words = fullName.trim().split(RegExp(r'\s+'));
-    if (words.isEmpty || words.first.isEmpty) return '—';
-    if (words.length == 1) return words.first.substring(0, 1).toUpperCase();
-    return '${words.first.substring(0, 1)}${words.last.substring(0, 1)}'
-        .toUpperCase();
+  void note(String text) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<void> saveLocal(String text) async {
+    try { await workplace.save(); if (mounted) setState(() {}); note(text); }
+    catch (_) { note('Не удалось сохранить локальные настройки'); }
+  }
+
+  Future<List<String>?> fields(String title, List<String> labels,
+      {List<String>? initial, bool secret = false}) async {
+    final controls = List.generate(labels.length,
+      (i) => TextEditingController(text: initial == null ? '' : initial[i]));
+    final result = await showDialog<List<String>>(context: context, builder: (ctx) => AlertDialog(
+      title: Text(title),
+      content: SizedBox(width: 460, child: SingleChildScrollView(child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: List.generate(labels.length, (i) => Padding(
+          padding: const EdgeInsets.only(bottom: 14),
+          child: TextField(controller: controls[i], obscureText: secret,
+            autocorrect: !secret, enableSuggestions: !secret,
+            maxLines: secret ? 1 : null,
+            decoration: InputDecoration(labelText: labels[i])),
+        )),
+      ))),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+        TextButton(onPressed: () => Navigator.pop(ctx,
+          controls.map((c) => c.text).toList()), child: const Text('Продолжить')),
+      ],
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    for (final c in controls) { c.dispose(); }
+    return result;
+  }
+
+  Future<void> info(String title, String text) => showDialog<void>(context: context,
+    builder: (ctx) => AlertDialog(title: Text(title),
+      content: SizedBox(width: 500, child: SingleChildScrollView(child: SelectableText(text))),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Закрыть'))]));
+
+  Future<void> editContacts() async {
+    final p = workplace.profile;
+    final values = await fields('Мои контакты', ['Рабочий телефон', 'E-mail'],
+      initial: ['${p['phone'] ?? ''}', '${p['email'] ?? ''}']);
+    if (values == null || !mounted) return;
+    final email = values[1].trim();
+    if (email.isNotEmpty && !RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(email)) {
+      note('Введите корректный e-mail'); return;
+    }
+    p['phone'] = values[0].trim(); p['email'] = email;
+    await saveLocal('Контакты сохранены локально. Кадровая запись БД не изменена.');
+  }
+
+  Future<void> loadPhoto() async {
+    final values = await fields('Фото профиля', ['Полный путь к JPG или PNG (до 5 МБ)']);
+    if (values == null || !mounted) return;
+    try {
+      final file = File(values[0].trim().replaceAll('"', ''));
+      if (await file.length() > 5 * 1024 * 1024) { note('Размер фото должен быть до 5 МБ'); return; }
+      final bytes = await file.readAsBytes();
+      final codec = await instantiateImageCodec(bytes); codec.dispose();
+      workplace.profile['photo'] = base64Encode(bytes);
+      await saveLocal('Фото сохранено');
+    } catch (_) { note('Не удалось открыть изображение. Проверьте путь и формат.'); }
+  }
+
+  Future<void> changePassword() async {
+    if (workplace.userId == null) { note('Войдите заново'); return; }
+    final values = await fields('Смена пароля',
+      ['Текущий пароль', 'Новый пароль — минимум 10 символов', 'Повторите новый пароль'], secret: true);
+    if (values == null || !mounted) return;
+    if (values[1].length < 10 || values[1] != values[2] || values[0] == values[1]) {
+      note('Новый пароль: от 10 символов, отличается от старого; повторы должны совпадать'); return;
+    }
+    try {
+      final db = context.read<AppDatabase>();
+      final user = await context.read<AuthRepository>().login(workplace.login, values[0]);
+      if (user == null || user.id != workplace.userId) { note('Текущий пароль неверный'); return; }
+      await (db.update(db.users)..where((u) => u.id.equals(user.id))).write(
+        UsersCompanion(passwordHash: Value(BCrypt.hashpw(values[1], BCrypt.gensalt()))));
+      workplace.event('Пароль изменён');
+      try { await workplace.save(); } catch (_) {}
+      note('Пароль изменён в БД');
+    } catch (_) { note('Не удалось изменить пароль'); }
+  }
+
+  Future<void> lockWorkplace() async {
+    if (workplace.userId == null) { note('Войдите заново'); return; }
+    final repo = context.read<AuthRepository>();
+    final userId = workplace.userId;
+    final login = workplace.login;
+    final control = TextEditingController();
+    String? error;
+    bool busy = false;
+    workplace.event('Рабочее место заблокировано');
+    await showDialog<void>(context: context, barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(builder: (ctx, update) {
+        Future<void> unlock() async {
+          if (busy) return;
+          update(() { busy = true; error = null; });
+          try {
+            final user = await repo.login(login, control.text);
+            if (!ctx.mounted) return;
+            if (user != null && user.id == userId) {
+              workplace.event('Рабочее место разблокировано');
+              Navigator.pop(dialogContext);
+            } else { update(() => error = 'Неверный пароль или аккаунт отключён'); }
+          } catch (_) { if (ctx.mounted) update(() => error = 'Не удалось проверить пароль'); }
+          finally { if (ctx.mounted) update(() => busy = false); }
+        }
+        return PopScope(canPop: false, child: AlertDialog(
+          title: const Text('Рабочее место заблокировано'),
+          content: SizedBox(width: 380, child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text('Введите пароль аккаунта $login'), const SizedBox(height: 16),
+            TextField(controller: control, obscureText: true, autocorrect: false,
+              enableSuggestions: false, onSubmitted: (_) => unlock(),
+              decoration: InputDecoration(labelText: 'Пароль', errorText: error)),
+          ])),
+          actions: [TextButton(onPressed: busy ? null : unlock,
+            child: Text(busy ? 'Проверка…' : 'Разблокировать'))],
+        ));
+      }));
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    control.dispose();
+    try { await workplace.save(); } catch (_) {}
+  }
+
+  Future<void> history() async {
+    final events = List<dynamic>.from(workplace.profile['events'] ?? []);
+    await info('История входов и безопасности',
+      'Только события этой версии на этом компьютере. Не является журналом аудита.\n\n' +
+      (events.isEmpty ? 'Событий пока нет' : events.reversed.map((e) =>
+        '${e['time']} — ${e['action']}').join('\n\n')));
+  }
+
+  Future<void> support() async {
+    final result = await fields('Черновик обращения — без отправки',
+      ['Тема', 'Описание — без паролей и данных клиентов']);
+    if (result == null || !mounted) return;
+    if (result.any((v) => v.trim().isEmpty)) { note('Заполните тему и описание'); return; }
+    final drafts = List<dynamic>.from(workplace.profile['drafts'] ?? []);
+    drafts.add({'subject': result[0].trim(), 'text': result[1].trim(),
+      'time': DateTime.now().toIso8601String()});
+    workplace.profile['drafts'] = drafts;
+    await saveLocal('Черновик сохранён локально. Обращение не отправлено.');
+  }
+
+  Widget section(String title, IconData icon, String subtitle, Widget child) {
+    final color = Theme.of(context).colorScheme.primary;
+    return Panel(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Container(padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(color: color.withOpacity(0.10),
+            borderRadius: BorderRadius.circular(10)),
+          child: Icon(icon, color: color, size: 22)),
+        const SizedBox(width: 12),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          Text(subtitle, style: const TextStyle(fontSize: 11, color: bankGrey)),
+        ])),
+      ]),
+      const SizedBox(height: 20), child,
+    ]));
+  }
+
+  Widget actionRow(IconData icon, String title, String subtitle, VoidCallback action) =>
+    ListTile(contentPadding: EdgeInsets.zero,
+      leading: Icon(icon, color: Theme.of(context).colorScheme.primary, size: 21),
+      title: Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+      subtitle: Text(subtitle, style: const TextStyle(fontSize: 11)),
+      trailing: const Icon(Icons.chevron_right, size: 20), onTap: action);
+
+  String value(String key) {
+    final text = '${workplace.profile[key] ?? ''}'.trim();
+    return text.isEmpty ? 'Не указан' : text;
+  }
+
+  Widget profileCard() {
+    final photo = workplace.profile['photo'] as String?;
+    final words = widget.employeeName.trim().split(RegExp(r'\s+'))
+      .where((w) => w.isNotEmpty).take(2);
+    final initials = words.map((w) => w[0]).join();
+    return section('Мой профиль', Icons.person_outline, 'Личные данные и контакты',
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          CircleAvatar(radius: 34,
+            backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.10),
+            backgroundImage: photo == null ? null : MemoryImage(base64Decode(photo)),
+            child: photo == null ? Text(initials,
+              style: TextStyle(fontSize: 19, color: Theme.of(context).colorScheme.primary)) : null),
+          const SizedBox(width: 16),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(widget.employeeName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
+            Text(widget.employeePosition, style: const TextStyle(color: bankGrey, fontSize: 12)),
+            const SizedBox(height: 5),
+            Text('Логин: ${workplace.login}', style: const TextStyle(color: bankGrey, fontSize: 11)),
+          ])),
+        ]),
+        const SizedBox(height: 16),
+        const Divider(height: 1), const SizedBox(height: 12),
+        InfoLine('Телефон', value('phone')), InfoLine('E-mail', value('email')),
+        const SizedBox(height: 12),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          OutlinedButton.icon(onPressed: editContacts, icon: const Icon(Icons.edit_outlined, size: 16),
+            label: const Text('Изменить контакты')),
+          TextButton.icon(onPressed: loadPhoto, icon: const Icon(Icons.photo_camera_outlined, size: 16),
+            label: const Text('Изменить фото')),
+          if (photo != null) TextButton(onPressed: () async {
+            workplace.profile.remove('photo'); await saveLocal('Фото удалено');
+          }, child: const Text('Удалить фото')),
+        ]),
+        const SizedBox(height: 8),
+        const Text('Фото и контакты сохраняются локально, отдельно от кадровой записи БД.',
+          style: TextStyle(color: bankGrey, fontSize: 10, height: 1.5)),
+      ]));
+  }
+
+  Widget securityCard() => section('Безопасность', Icons.lock_outline,
+    'Защита аккаунта и рабочего места', Column(children: [
+      actionRow(Icons.key_outlined, 'Сменить пароль', 'Потребуется текущий пароль', changePassword),
+      const Divider(height: 1),
+      actionRow(Icons.lock_outline, 'Заблокировать окно', 'Продолжение работы по паролю', lockWorkplace),
+      const Divider(height: 1),
+      actionRow(Icons.history, 'История входов', 'События на этом компьютере', history),
+      const SizedBox(height: 8),
+      const Text('Блокировка окна не заменяет блокировку Windows.',
+        style: TextStyle(fontSize: 10, color: bankGrey)),
+    ]));
+
+  Widget appearanceCard() {
+    final modes = [ThemeMode.light, ThemeMode.dark, ThemeMode.system];
+    final labels = ['Светлая', 'Тёмная', 'Системная'];
+    final icons = [Icons.light_mode_outlined, Icons.dark_mode_outlined, Icons.settings_brightness];
+    final accents = [bankBlue, const Color(0xFF0D9488), const Color(0xFF7C3AED), const Color(0xFFDB2777)];
+    final accentLabels = ['Синий', 'Бирюзовый', 'Фиолетовый', 'Розовый'];
+    final primary = Theme.of(context).colorScheme.primary;
+    return section('Оформление', Icons.palette_outlined, 'Тема и акцентный цвет',
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Тема', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+        const SizedBox(height: 10),
+        Row(children: List.generate(3, (i) {
+          final selected = workplace.theme == modes[i];
+          return Expanded(child: Padding(padding: EdgeInsets.only(right: i == 2 ? 0 : 8),
+            child: Material(color: selected ? primary.withOpacity(0.10) : Colors.transparent,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10),
+                side: BorderSide(color: selected ? primary : Theme.of(context).dividerColor)),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(onTap: () async {
+                workplace.theme = modes[i]; await saveLocal('Тема сохранена');
+              }, child: Padding(padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 4),
+                child: Column(children: [
+                  Icon(icons[i], color: selected ? primary : bankGrey, size: 23),
+                  const SizedBox(height: 7),
+                  Text(labels[i], style: TextStyle(fontSize: 11,
+                    color: selected ? primary : Theme.of(context).colorScheme.onSurface)),
+                ]))),
+            )));
+        })),
+        const SizedBox(height: 20),
+        const Text('Акцентный цвет', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+        const SizedBox(height: 12),
+        Wrap(spacing: 12, runSpacing: 8, children: List.generate(accents.length, (i) => Tooltip(
+          message: accentLabels[i], child: Semantics(button: true,
+            selected: workplace.accent.value == accents[i].value, label: accentLabels[i],
+            child: InkWell(borderRadius: BorderRadius.circular(22), onTap: () async {
+              workplace.accent = accents[i]; await saveLocal('Цвет сохранён');
+            }, child: CircleAvatar(radius: 20, backgroundColor: accents[i],
+              child: workplace.accent.value == accents[i].value
+                ? const Icon(Icons.check, color: Colors.white, size: 20) : null)),
+          )))),
+        const SizedBox(height: 14),
+        const Text('Применяется сразу. Цвета статусов, карт и элементов с фиксированным цветом сохраняются.',
+          style: TextStyle(fontSize: 10, color: bankGrey, height: 1.5)),
+      ]));
+  }
+
+  Widget notificationsCard() => section('Уведомления', Icons.notifications_outlined,
+    'Параметры оповещений', Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SwitchListTile(contentPadding: EdgeInsets.zero,
+        title: const Text('Уведомления по электронной почте', style: TextStyle(fontSize: 13)),
+        subtitle: const Text('Демонстрационная настройка', style: TextStyle(fontSize: 11, color: bankGrey)),
+        value: emailNotifications, onChanged: (v) => setState(() => emailNotifications = v)),
+      const Divider(height: 16),
+      SwitchListTile(contentPadding: EdgeInsets.zero,
+        title: const Text('Уведомления о новых заявках', style: TextStyle(fontSize: 13)),
+        subtitle: const Text('Демонстрационная настройка', style: TextStyle(fontSize: 11, color: bankGrey)),
+        value: applicationNotifications, onChanged: (v) => setState(() => applicationNotifications = v)),
+      const SizedBox(height: 16),
+      ElevatedButton.icon(onPressed: () => widget.onSave(emailNotifications, applicationNotifications),
+        icon: const Icon(Icons.check, size: 17), label: const Text('Сохранить настройки'),
+        style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15))),
+    ]));
+
+  Widget helpCard() => section('Помощь', Icons.help_outline, 'Инструкции и информация о приложении',
+    Wrap(spacing: 10, runSpacing: 10, children: [
+      OutlinedButton.icon(icon: const Icon(Icons.menu_book_outlined, size: 18),
+        onPressed: () => info('Инструкция',
+          'Клиенты: найдите клиента и откройте его карточку.\n\n'
+          'Счета и карты: выберите поле поиска. По ID — только точное совпадение.\n\n'
+          'Фото профиля: укажите полный путь к JPG или PNG до 5 МБ.\n\n'
+          'Смена пароля: потребуется текущий пароль.'), label: const Text('Инструкция')),
+      OutlinedButton.icon(icon: const Icon(Icons.edit_note, size: 18), onPressed: support,
+        label: const Text('Создать обращение')),
+      OutlinedButton.icon(icon: const Icon(Icons.drafts_outlined, size: 18), onPressed: () {
+        final drafts = List<dynamic>.from(workplace.profile['drafts'] ?? []);
+        info('Мои черновики', drafts.isEmpty ? 'Черновиков нет' : drafts.map((d) =>
+          '${d['time']}\n${d['subject']}\n${d['text']}').join('\n\n────────\n\n'));
+      }, label: const Text('Черновики')),
+      OutlinedButton.icon(icon: const Icon(Icons.info_outline, size: 18), onPressed: () => info('О приложении',
+        'TriBit Bank Portal\nВерсия: ${const String.fromEnvironment('APP_VERSION', defaultValue: 'не указана')}\n\n'
+        'Фото, контакты и черновики хранятся локально. Отправка обращений не подключена.'),
+        label: const Text('О приложении')),
+    ]));
+
+  @override
+  Widget build(BuildContext context) => PageLayout(title: 'Настройки',
+    child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      const Text('Профиль, безопасность и параметры приложения',
+        style: TextStyle(color: bankGrey, fontSize: 13)),
+      const SizedBox(height: 24),
+      LayoutBuilder(builder: (context, constraints) {
+        if (constraints.maxWidth < 800) {
+          return Column(children: [
+            profileCard(), const SizedBox(height: 20), securityCard(),
+            const SizedBox(height: 20), appearanceCard(),
+            const SizedBox(height: 20), notificationsCard(),
+          ]);
+        }
+        return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(child: Column(children: [profileCard(), const SizedBox(height: 20), securityCard()])),
+          const SizedBox(width: 20),
+          Expanded(child: Column(children: [appearanceCard(), const SizedBox(height: 20), notificationsCard()])),
+        ]);
+      }),
+      const SizedBox(height: 20), helpCard(),
+    ]));
+}
+
+class ClientCardArtwork extends StatelessWidget {
+  final BankClient client;
+  final int style;
+  const ClientCardArtwork({super.key, required this.client, required this.style});
+
+  @override
+  Widget build(BuildContext context) {
+    final names = ['Classic', 'Aurora', 'Black Gold'];
+    final colors = <List<Color>>[
+      [const Color(0xFF2563EB), const Color(0xFF0B204A)],
+      [const Color(0xFF7C3AED), const Color(0xFF192458)],
+      [const Color(0xFF242424), const Color(0xFF090B10)],
+    ];
+    final accents = [const Color(0xFFBFDBFE), const Color(0xFF67E8F9), const Color(0xFFE7C57C)];
+    final accent = client.cardBlocked ? Colors.white60 : accents[style];
+    return Container(
+      width: 340, height: 214, clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: accent.withOpacity(0.45)),
+        gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight,
+          colors: client.cardBlocked
+            ? [const Color(0xFF64748B), const Color(0xFF1E293B)] : colors[style]),
+      ),
+      child: Stack(children: [
+        Positioned(right: -40, top: -65, child: Container(
+          width: 220, height: 220,
+          decoration: BoxDecoration(shape: BoxShape.circle,
+            border: Border.all(color: accent.withOpacity(0.15), width: 28)))),
+        Positioned(right: 25, bottom: -80, child: Container(
+          width: 200, height: 200,
+          decoration: BoxDecoration(shape: BoxShape.circle,
+            border: Border.all(color: accent.withOpacity(0.1), width: 20)))),
+        Padding(padding: const EdgeInsets.all(22),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              const Text('TriBit Bank', style: TextStyle(color: Colors.white,
+                fontSize: 18, fontWeight: FontWeight.bold)),
+              Text(names[style].toUpperCase(), style: TextStyle(color: accent,
+                fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 1)),
+            ]),
+            const SizedBox(height: 16),
+            Row(children: [
+              Container(width: 34, height: 26,
+                decoration: BoxDecoration(color: const Color(0xFFE7C57C),
+                  borderRadius: BorderRadius.circular(5)),
+                child: const Icon(Icons.grid_view, size: 21, color: Color(0xFF8D713D))),
+              const SizedBox(width: 12),
+              Icon(client.cardBlocked ? Icons.lock_outline : Icons.wifi, size: 23, color: accent),
+            ]),
+            const Spacer(),
+            Text('••••  ••••  ••••  ${cardTail(client.id)}',
+              style: const TextStyle(color: Colors.white, fontSize: 21, letterSpacing: 1.5)),
+            const SizedBox(height: 14),
+            Row(children: [
+              Expanded(child: Text(client.name, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white70, fontSize: 10))),
+              const SizedBox(width: 12),
+              const Text('08/29', style: TextStyle(color: Colors.white70, fontSize: 11)),
+              const SizedBox(width: 14),
+              Text('МИР', style: TextStyle(color: accent, fontSize: 17, fontWeight: FontWeight.bold)),
+            ]),
+          ])),
+      ]),
+    );
+  }
+}
+
+enum ClientSearchField { fullName, id, phone, email }
+
+class ClientSearchPanel extends StatefulWidget {
+  final List<BankClient> clients;
+  final BankClient selectedClient;
+  final ValueChanged<BankClient> onSelected;
+  const ClientSearchPanel({super.key, required this.clients,
+    required this.selectedClient, required this.onSelected});
+  @override
+  State<ClientSearchPanel> createState() => _ClientSearchPanelState();
+}
+
+class _ClientSearchPanelState extends State<ClientSearchPanel> {
+  final controller = TextEditingController();
+  String query = '';
+  ClientSearchField field = ClientSearchField.fullName;
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  String normalize(String value) => value.toLowerCase().replaceAll('ё', 'е')
+    .trim().replaceAll(RegExp(r'\s+'), ' ');
+
+  String phone(String value) {
+    final digits = value.replaceAll(RegExp(r'\D'), '');
+    return digits.length == 11 && (digits.startsWith('7') || digits.startsWith('8'))
+      ? digits.substring(1) : digits;
+  }
+
+  String get hint {
+    switch (field) {
+      case ClientSearchField.fullName: return 'Введите ФИО или часть имени';
+      case ClientSearchField.id: return 'Введите точный ID клиента';
+      case ClientSearchField.phone: return 'Введите телефон или часть номера';
+      case ClientSearchField.email: return 'Введите e-mail или его часть';
+    }
+  }
+
+  bool matches(BankClient client) {
+    final q = normalize(query);
+    if (q.isEmpty) return false;
+    switch (field) {
+      case ClientSearchField.fullName:
+        final name = normalize(client.name);
+        return q.split(' ').every((word) => name.contains(word));
+      case ClientSearchField.id:
+        return client.id.trim() == query.trim();
+      case ClientSearchField.phone:
+        if (!RegExp(r'^[+\d\s()\-]+$').hasMatch(q)) return false;
+        final digits = phone(q);
+        return digits.isNotEmpty && phone(client.phone).contains(digits);
+      case ClientSearchField.email:
+        return normalize(client.email).contains(q);
+    }
+  }
+
+  void select(BankClient client) {
+    widget.onSelected(client);
+    setState(() { query = ''; controller.clear(); });
+    FocusScope.of(context).unfocus();
   }
 
   @override
   Widget build(BuildContext context) {
-    return PageLayout(
-      title: 'Настройки',
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            flex: 2,
-            child: Panel(
-              title: 'Уведомления',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text(
-                      'Уведомления по электронной почте',
-                      style: TextStyle(fontSize: 13),
-                    ),
-                    subtitle: const Text(
-                      'Демонстрационная настройка',
-                      style: TextStyle(fontSize: 11, color: bankGrey),
-                    ),
-                    value: emailNotifications,
-                    onChanged: (value) {
-                      setState(() => emailNotifications = value);
-                    },
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text(
-                      'Уведомления о новых заявках',
-                      style: TextStyle(fontSize: 13),
-                    ),
-                    subtitle: const Text(
-                      'Демонстрационная настройка',
-                      style: TextStyle(fontSize: 11, color: bankGrey),
-                    ),
-                    value: applicationNotifications,
-                    onChanged: (value) {
-                      setState(() => applicationNotifications = value);
-                    },
-                  ),
-                  const SizedBox(height: 24),
-                  BankButton(
-                    'Сохранить настройки',
-                    onPressed: () => widget.onSave(
-                      emailNotifications,
-                      applicationNotifications,
-                    ),
-                  ),
-                ],
-              ),
+    final searching = query.trim().isNotEmpty;
+    final results = searching ? widget.clients.where(matches).toList() : <BankClient>[];
+    final count = results.length > 30 ? 30 : results.length;
+    return Panel(title: 'Поиск клиента',
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SizedBox(width: 180, child: DropdownButtonFormField<ClientSearchField>(
+            value: field, isExpanded: true,
+            decoration: const InputDecoration(labelText: 'Искать по'),
+            items: const [
+              DropdownMenuItem(value: ClientSearchField.fullName, child: Text('ФИО')),
+              DropdownMenuItem(value: ClientSearchField.id, child: Text('ID')),
+              DropdownMenuItem(value: ClientSearchField.phone, child: Text('Телефону')),
+              DropdownMenuItem(value: ClientSearchField.email, child: Text('E-mail')),
+            ],
+            onChanged: (value) {
+              if (value != null) setState(() {
+                field = value; query = ''; controller.clear();
+              });
+            },
+          )),
+          const SizedBox(width: 12),
+          Expanded(child: TextField(
+            controller: controller,
+            textInputAction: TextInputAction.search,
+            keyboardType: field == ClientSearchField.id ? TextInputType.number
+              : field == ClientSearchField.phone ? TextInputType.phone
+              : field == ClientSearchField.email ? TextInputType.emailAddress : TextInputType.text,
+            onChanged: (value) => setState(() => query = value),
+            onSubmitted: (_) { if (results.length == 1) select(results.first); },
+            decoration: InputDecoration(
+              labelText: 'Запрос', hintText: hint,
+              prefixIcon: const Icon(Icons.search, size: 21),
+              suffixIcon: query.isEmpty ? null : IconButton(
+                tooltip: 'Очистить поиск', icon: const Icon(Icons.close),
+                onPressed: () => setState(() { query = ''; controller.clear(); })),
             ),
-          ),
-          const SizedBox(width: 20),
-          Expanded(
-            child: Panel(
-              title: 'Профиль сотрудника',
-              child: Column(
-                children: [
-                  CircleAvatar(
-                    radius: 30,
-                    backgroundColor: const Color(0xFFEFF6FF),
-                    child: Text(
-                      _initials(widget.employeeName),
-                      style: const TextStyle(color: bankBlue),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  InfoLine('Сотрудник', widget.employeeName),
-                  InfoLine('Должность', widget.employeePosition),
-                  const InfoLine('E-mail', 'k.vorobiev@tribit.ru'),
-                  const InfoLine('Язык', 'Русский'),
-                  const InfoLine('Режим', 'Демонстрационный'),
-                ],
-              ),
+          )),
+        ]),
+        const SizedBox(height: 12),
+        if (!searching)
+          Text(field == ClientSearchField.id
+            ? 'По ID используется только точное совпадение.'
+            : 'Выберите поле и введите запрос. Можно искать по части значения.',
+            style: const TextStyle(color: bankGrey, fontSize: 12)),
+        if (searching) ...[
+          Text(results.isEmpty ? 'Клиенты не найдены. Проверьте запрос и выбранное поле.'
+            : 'Найдено клиентов: ${results.length}',
+            style: const TextStyle(color: bankGrey, fontSize: 12)),
+          if (results.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Container(
+              decoration: BoxDecoration(borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Theme.of(context).dividerColor)),
+              clipBehavior: Clip.antiAlias,
+              child: ConstrainedBox(constraints: const BoxConstraints(maxHeight: 300),
+                child: ListView.separated(
+                  shrinkWrap: true, primary: false, itemCount: count,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final client = results[index];
+                    final selected = client.id == widget.selectedClient.id;
+                    return ListTile(
+                      selected: selected, selectedTileColor: bankBlue.withOpacity(0.08),
+                      leading: CircleAvatar(child: Text(client.initials,
+                        style: const TextStyle(fontSize: 12))),
+                      title: Text(client.name, style: const TextStyle(fontSize: 13,
+                        fontWeight: FontWeight.w600)),
+                      subtitle: Text('ID: ${client.id} • ${client.phone}\n${client.email}',
+                        style: const TextStyle(fontSize: 11)),
+                      isThreeLine: true,
+                      trailing: Icon(selected ? Icons.check_circle : Icons.chevron_right,
+                        color: selected ? bankGreen : bankGrey),
+                      onTap: () => select(client),
+                    );
+                  },
+                )),
             ),
-          ),
+            if (results.length > 30)
+              const Padding(padding: EdgeInsets.only(top: 8),
+                child: Text('Показаны первые 30 совпадений. Уточните запрос.',
+                  style: TextStyle(color: bankGrey, fontSize: 11))),
+          ],
         ],
-      ),
+        const SizedBox(height: 16),
+        const Divider(height: 1),
+        const SizedBox(height: 12),
+        Row(children: [
+          const Icon(Icons.person_outline, color: bankBlue),
+          const SizedBox(width: 10),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Выбранный клиент', style: TextStyle(color: bankGrey, fontSize: 11)),
+            const SizedBox(height: 3),
+            Text(widget.selectedClient.name,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 3),
+            Text('ID: ${widget.selectedClient.id} • ${widget.selectedClient.phone}',
+              style: const TextStyle(color: bankGrey, fontSize: 11)),
+          ])),
+        ]),
+      ]),
     );
+  }
+}
+
+final workplace = WorkplacePreferences();
+
+class WorkplacePreferences extends ChangeNotifier {
+  Map<String, dynamic> data = {};
+  int? userId;
+  String login = '';
+  ThemeMode theme = ThemeMode.light;
+  Color accent = bankBlue;
+  Future<void> _pending = Future<void>.value();
+
+  File get file {
+    final root = Platform.environment['LOCALAPPDATA'] ??
+      Platform.environment['HOME'] ?? Directory.current.path;
+    return File('$root${Platform.pathSeparator}TriBitBank${Platform.pathSeparator}workplace.json');
+  }
+  Map<String, dynamic> get profile {
+    final key = 'user_${userId ?? 'guest'}';
+    final existing = data[key];
+    if (existing is Map<String, dynamic>) return existing;
+    final created = <String, dynamic>{}; data[key] = created; return created;
+  }
+  Future<void> load() async {
+    try {
+      if (!await file.exists()) return;
+      data = Map<String, dynamic>.from(jsonDecode(await file.readAsString()));
+      theme = ThemeMode.values.firstWhere((v) => v.name == data['theme'], orElse: () => ThemeMode.light);
+      if (data['accent'] is int) accent = Color(data['accent'] as int);
+    } catch (_) { data = {}; }
+  }
+  Future<void> save() {
+    data['theme'] = theme.name; data['accent'] = accent.value;
+    final content = jsonEncode(data);
+    notifyListeners();
+    final write = _pending.then((_) async {
+      final target = file;
+      await target.parent.create(recursive: true);
+      await target.writeAsString(content, flush: true);
+    });
+    _pending = write.catchError((Object _) {});
+    return write;
+  }
+  void event(String action) {
+    final events = List<dynamic>.from(profile['events'] ?? []);
+    events.add({'time': DateTime.now().toIso8601String(), 'action': action});
+    if (events.length > 100) events.removeRange(0, events.length - 100);
+    profile['events'] = events;
   }
 }
