@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' show instantiateImageCodec;
 import 'package:bcrypt/bcrypt.dart';
-import 'package:drift/drift.dart' hide Column;
+import 'package:drift/drift.dart' hide Column, Table;
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:provider/provider.dart';
@@ -34,10 +34,7 @@ Future<void> main() async {
   runApp(
     MultiProvider(
       providers: [
-        // 1. База: один экземпляр, закрывается при выходе из приложения.
         Provider<AppDatabase>(
-          // Если флаг не передан, база создаётся с демо-данными по умолчанию,
-          // чтобы приложение сразу могло работать через реальные таблицы БД.
           create: (_) => AppDatabase(
             seedDemo: const bool.fromEnvironment(
               'SEED_DEMO',
@@ -46,9 +43,6 @@ Future<void> main() async {
           ),
           dispose: (_, db) => db.close(),
         ),
-
-        // 2. Репозитории. Тип провайдера — ИНТЕРФЕЙС, реализация — Local*.
-        //    Чтобы перейти на сервер, замените Local* на Remote* в нужной строке.
         Provider<AuthRepository>(
           create: (c) => LocalAuthRepository(c.read<AppDatabase>()),
         ),
@@ -93,6 +87,24 @@ String money(num value) {
   return '₽ $integer,${parts[1]}';
 }
 
+String moneyCompact(num value) {
+  if (value.abs() >= 1000000) {
+    return '₽ ${(value / 1000000).toStringAsFixed(1)} млн';
+  }
+  if (value.abs() >= 1000) {
+    return '₽ ${(value / 1000).toStringAsFixed(1)} тыс';
+  }
+  return money(value);
+}
+
+String plural(int n, String one, String few, String many) {
+  final mod10 = n % 10;
+  final mod100 = n % 100;
+  if (mod10 == 1 && mod100 != 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
 String dateText(DateTime date) {
   String two(int value) => value.toString().padLeft(2, '0');
   return '${two(date.day)}.${two(date.month)}.${date.year}';
@@ -114,7 +126,7 @@ Color statusColor(String status) {
   if (['Одобрена', 'Успешно', 'Активна', 'Активен'].contains(status)) {
     return bankGreen;
   }
-  if (['Отклонена', 'Заблокирована'].contains(status)) {
+  if (['Отклонена', 'Заблокирована', 'Просрочен'].contains(status)) {
     return bankRed;
   }
   return const Color(0xFFF59E0B);
@@ -259,7 +271,7 @@ enum ActiveTab {
   creditApplications,
   createCreditApplication,
   creditApplicationDetails,
-  creditRepayment,
+  overdueLoans,
   actionLog,
   settings,
 }
@@ -320,8 +332,9 @@ class BankLog {
   final DateTime date;
   final String action;
   final String object;
+  final String? employeeId;
 
-  BankLog(this.action, this.object) : date = DateTime.now();
+  BankLog(this.action, this.object, [this.employeeId]) : date = DateTime.now();
 }
 
 // ============================================================================
@@ -355,6 +368,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   final logs = <BankLog>[];
   String currentEmployeeName = 'Неизвестный сотрудник';
   String currentEmployeePosition = 'Сотрудник';
+  String currentEmployeeId = '—';
 
   int nextApplication = 15;
   bool emailNotifications = true;
@@ -469,10 +483,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     _loadDbData();
   }
 
-  void setCurrentEmployee(String name, String position) {
+  void setCurrentEmployee(String name, String position, String id) {
     setState(() {
       currentEmployeeName = name;
       currentEmployeePosition = position;
+      currentEmployeeId = id;
     });
   }
 
@@ -483,17 +498,17 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     }
     setState(() {
       if (_currentTab == ActiveTab.auth && tab != ActiveTab.auth) {
-        addLog('Вход в систему', currentEmployeeName);
+        addLog('Вход в систему', 'ID $currentEmployeeId');
       }
       if (tab == ActiveTab.auth) {
-        addLog('Выход из системы', currentEmployeeName);
+        addLog('Выход из системы', 'ID $currentEmployeeId');
       }
       _currentTab = tab;
     });
   }
 
   void addLog(String action, String object) {
-    logs.insert(0, BankLog(action, object));
+    logs.insert(0, BankLog(action, object, currentEmployeeId));
   }
 
   void message(String text) {
@@ -565,35 +580,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     );
   }
 
-  Future<bool> repay(double amount) async {
-    final client = selectedClient;
-
-    if (amount > client.balance || amount > client.debt) {
-      message('Проверьте баланс и остаток задолженности');
-      return false;
-    }
-
-    final confirmed = await confirmAction(
-      context,
-      'Подтвердить платёж?',
-      '${client.name}\n'
-          'Договор CR-${client.id}\n'
-          'Сумма: ${money(amount)}',
-    );
-
-    if (!confirmed || !mounted) return false;
-
+  void remindOverdue(BankClient client) {
     setState(() {
-      client.balance = ((client.balance - amount) * 100).round() / 100;
-      client.debt = ((client.debt - amount) * 100).round() / 100;
-      addLog(
-        'Погашение кредита: ${money(amount)}',
-        'CR-${client.id}',
-      );
+      addLog('Напоминание о просрочке', 'CR-${client.id}');
     });
-
-    message('Платёж успешно проведён');
-    return true;
+    message('Напоминание клиенту ${client.name} зарегистрировано');
   }
 
   Widget buildContent() {
@@ -601,16 +592,19 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       case ActiveTab.auth:
         return MainAuth(
           onTabChanged: navigate,
-          onEmployeeLoggedIn: (name) => setCurrentEmployee(name, 'Сотрудник'),
-          onEmployeePositionLoggedIn: (position) {
-            setState(() => currentEmployeePosition = position);
+          onEmployeeLoggedIn: (name, position, id) {
+            setCurrentEmployee(name, position, id);
           },
         );
 
       case ActiveTab.overview:
         return OverviewScreen(
+          clients: clients,
+          applications: applications,
           onClients: () => navigate(ActiveTab.clients),
           onAccounts: () => navigate(ActiveTab.accounts),
+          onApplications: () => navigate(ActiveTab.creditApplications),
+          onOverdue: () => navigate(ActiveTab.overdueLoans),
         );
 
       case ActiveTab.clients:
@@ -660,34 +654,28 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           onReject: () => changeApplicationStatus('Отклонена'),
         );
 
-      case ActiveTab.creditRepayment:
-        return CreditRepaymentScreen(
-          key: ValueKey(selectedClient.id),
-          client: selectedClient,
+      case ActiveTab.overdueLoans:
+        return OverdueLoansScreen(
           clients: clients,
-          onClientChanged: (client) {
-            setState(() => selectedClient = client);
-          },
-          onPay: repay,
+          onOpenClient: openClient,
+          onRemind: remindOverdue,
         );
 
       case ActiveTab.actionLog:
-        return ActionLogScreen(
-          logs: logs,
-          employeeName: currentEmployeeName,
-        );
+        return ActionLogScreen(logs: logs);
 
       case ActiveTab.settings:
         return SettingsScreen(
           employeeName: currentEmployeeName,
           employeePosition: currentEmployeePosition,
+          employeeId: currentEmployeeId,
           emailNotifications: emailNotifications,
           applicationNotifications: applicationNotifications,
           onSave: (email, application) {
             setState(() {
               emailNotifications = email;
               applicationNotifications = application;
-              addLog('Изменение настроек', 'Профиль сотрудника');
+              addLog('Изменение настроек', 'ID $currentEmployeeId');
             });
             message('Настройки сохранены');
           },
@@ -705,6 +693,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
               currentTab: _currentTab,
               employeeName: currentEmployeeName,
               employeePosition: currentEmployeePosition,
+              employeeId: currentEmployeeId,
               onTabChanged: navigate,
             ),
           Expanded(
@@ -751,6 +740,7 @@ class SideInfo extends StatelessWidget {
   final ActiveTab currentTab;
   final String employeeName;
   final String employeePosition;
+  final String employeeId;
   final ValueChanged<ActiveTab> onTabChanged;
 
   const SideInfo({
@@ -758,6 +748,7 @@ class SideInfo extends StatelessWidget {
     required this.currentTab,
     required this.employeeName,
     required this.employeePosition,
+    required this.employeeId,
     required this.onTabChanged,
   });
 
@@ -849,9 +840,9 @@ class SideInfo extends StatelessWidget {
                   ActiveTab.creditApplications,
                 ),
                 menuItem(
-                  Icons.swap_horiz_rounded,
-                  'Платежи по кредитам',
-                  ActiveTab.creditRepayment,
+                  Icons.warning_amber_rounded,
+                  'Просроченные кредиты',
+                  ActiveTab.overdueLoans,
                 ),
                 menuItem(
                   Icons.history,
@@ -888,7 +879,7 @@ class SideInfo extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      employeePosition,
+                      'ID $employeeId • $employeePosition',
                       style: TextStyle(color: Colors.grey[500], fontSize: 10),
                     ),
                   ],
@@ -1226,14 +1217,13 @@ class BankTable extends StatelessWidget {
 
 class MainAuth extends StatefulWidget {
   final ValueChanged<ActiveTab> onTabChanged;
-  final ValueChanged<String> onEmployeeLoggedIn;
-  final ValueChanged<String> onEmployeePositionLoggedIn;
+  final void Function(String name, String position, String id)
+      onEmployeeLoggedIn;
 
   const MainAuth({
     super.key,
     required this.onTabChanged,
     required this.onEmployeeLoggedIn,
-    required this.onEmployeePositionLoggedIn,
   });
 
   @override
@@ -1241,8 +1231,8 @@ class MainAuth extends StatefulWidget {
 }
 
 class _MainAuthState extends State<MainAuth> {
-  final _loginController = TextEditingController(text: 'admin');
-  final _passwordController = TextEditingController(text: 'password');
+  final _loginController = TextEditingController(text: 'manager');
+  final _passwordController = TextEditingController(text: '1234');
   bool _isLoading = false;
 
   Future<void> _login() async {
@@ -1276,8 +1266,11 @@ class _MainAuthState extends State<MainAuth> {
       try { await workplace.save(); } catch (_) {}
       if (!mounted) return;
       final employee = await authRepo.getEmployeeByUserId(user.id);
-      widget.onEmployeeLoggedIn(employee?.fullName ?? user.login);
-      widget.onEmployeePositionLoggedIn(employee?.position ?? 'Сотрудник');
+      widget.onEmployeeLoggedIn(
+        employee?.fullName ?? user.login,
+        employee?.position ?? 'Сотрудник',
+        user.id.toString(),
+      );
       widget.onTabChanged(ActiveTab.overview);
     } catch (e) {
       if (!mounted) return;
@@ -1507,54 +1500,101 @@ class TextFormFieldEmail extends StatelessWidget {
 // ============================================================================
 
 class OverviewScreen extends StatelessWidget {
+  final List<BankClient> clients;
+  final List<CreditApplication> applications;
   final VoidCallback onClients;
   final VoidCallback onAccounts;
+  final VoidCallback onApplications;
+  final VoidCallback onOverdue;
 
   const OverviewScreen({
     super.key,
+    required this.clients,
+    required this.applications,
     required this.onClients,
     required this.onAccounts,
+    required this.onApplications,
+    required this.onOverdue,
   });
 
   @override
   Widget build(BuildContext context) {
+    final pending =
+        applications.where((a) => a.status == 'На рассмотрении').toList();
+    final approved =
+        applications.where((a) => a.status == 'Одобрена').toList();
+    final approvedSum = approved.fold<double>(0, (s, a) => s + a.amount);
+    final overdue = clients.where((c) => c.debt > 0).toList();
+    final overdueSum = overdue.fold<double>(0, (s, c) => s + c.debt);
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final createdToday = applications
+        .where((a) =>
+            a.createdAt.year == today.year &&
+            a.createdAt.month == today.month &&
+            a.createdAt.day == today.day)
+        .length;
+
+    final days = List.generate(
+      7,
+      (i) => today.subtract(Duration(days: 6 - i)),
+    );
+    int countFor(DateTime day, String status) => applications
+        .where((a) =>
+            a.status == status &&
+            a.createdAt.year == day.year &&
+            a.createdAt.month == day.month &&
+            a.createdAt.day == day.day)
+        .length;
+    final approvedCounts = days.map((d) => countFor(d, 'Одобрена')).toList();
+    final rejectedCounts = days.map((d) => countFor(d, 'Отклонена')).toList();
+    final maxCount = [...approvedCounts, ...rejectedCounts]
+        .fold<int>(1, (a, b) => a > b ? a : b);
+    double barHeight(int count) => count == 0 ? 2 : 10 + (count / maxCount) * 100;
+    const weekLabels = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
     return PageLayout(
       title: 'Обзор показателей',
       child: Column(
         children: [
-          const Row(
+          Row(
             children: [
               Expanded(
                 child: StatCard(
                   title: 'НОВЫЕ ЗАЯВКИ',
-                  value: '14 заявок',
-                  sub: '+ 4 за последний час',
+                  value: '${pending.length} ${plural(pending.length, 'заявка', 'заявки', 'заявок')}',
+                  sub: 'Создано сегодня: $createdToday',
                   isAccent: true,
+                  onTap: onApplications,
                 ),
               ),
-              SizedBox(width: 16),
+              const SizedBox(width: 16),
               Expanded(
                 child: StatCard(
-                  title: 'НА ПРОВЕРКЕ',
-                  value: '8 клиентов',
-                  sub: 'Ожидают скоринг СБ',
+                  title: 'ВСЕГО КЛИЕНТОВ',
+                  value: '${clients.length} ${plural(clients.length, 'клиент', 'клиента', 'клиентов')}',
+                  sub: 'В базе банка',
+                  onTap: onClients,
                 ),
               ),
-              SizedBox(width: 16),
+              const SizedBox(width: 16),
               Expanded(
                 child: StatCard(
-                  title: 'ОДОБРЕНО СЕГОДНЯ',
-                  value: '24 кредита',
-                  sub: 'Сумма: ₽ 18.4 млн',
+                  title: 'ОДОБРЕНО ЗАЯВОК',
+                  value: '${approved.length} ${plural(approved.length, 'кредит', 'кредита', 'кредитов')}',
+                  sub: 'Сумма: ${moneyCompact(approvedSum)}',
+                  onTap: onApplications,
                 ),
               ),
-              SizedBox(width: 16),
+              const SizedBox(width: 16),
               Expanded(
                 child: StatCard(
                   title: 'ПРОСРОЧКИ ПЛАТЕЖЕЙ',
-                  value: '3 случая',
-                  sub: 'Требуется созвон',
+                  value: '${overdue.length} ${plural(overdue.length, 'случай', 'случая', 'случаев')}',
+                  sub: 'Долг: ${moneyCompact(overdueSum)}',
                   isWarning: true,
+                  onTap: onOverdue,
                 ),
               ),
             ],
@@ -1563,23 +1603,45 @@ class OverviewScreen extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Expanded(
+              Expanded(
                 flex: 2,
                 child: Panel(
                   title: 'Обработка кредитных заявок за неделю',
                   child: Padding(
-                    padding: EdgeInsets.only(top: 25),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      crossAxisAlignment: CrossAxisAlignment.end,
+                    padding: const EdgeInsets.only(top: 25),
+                    child: Column(
                       children: [
-                        BarChartGroup(label: 'Пн', val1: 60, val2: 30),
-                        BarChartGroup(label: 'Вт', val1: 90, val2: 20),
-                        BarChartGroup(label: 'Ср', val1: 80, val2: 45),
-                        BarChartGroup(label: 'Чт', val1: 110, val2: 25),
-                        BarChartGroup(label: 'Пт', val1: 95, val2: 15),
-                        BarChartGroup(label: 'Сб', val1: 40, val2: 10),
-                        BarChartGroup(label: 'Вс', val1: 70, val2: 20),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: List.generate(7, (i) {
+                            final label = weekLabels[days[i].weekday - 1];
+                            return Tooltip(
+                              message:
+                                  '$label: одобрено ${approvedCounts[i]}, отклонено ${rejectedCounts[i]}',
+                              child: BarChartGroup(
+                                label: label,
+                                val1: barHeight(approvedCounts[i]),
+                                val2: barHeight(rejectedCounts[i]),
+                              ),
+                            );
+                          }),
+                        ),
+                        const SizedBox(height: 18),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(width: 10, height: 10, color: bankGreen),
+                            const SizedBox(width: 6),
+                            const Text('Одобрено',
+                                style: TextStyle(fontSize: 11, color: bankGrey)),
+                            const SizedBox(width: 18),
+                            Container(width: 10, height: 10, color: bankRed),
+                            const SizedBox(width: 6),
+                            const Text('Отклонено',
+                                style: TextStyle(fontSize: 11, color: bankGrey)),
+                          ],
+                        ),
                       ],
                     ),
                   ),
@@ -1596,6 +1658,19 @@ class OverviewScreen extends StatelessWidget {
                         'Открыть базу клиентов',
                         outlined: true,
                         onPressed: onClients,
+                      ),
+                      const SizedBox(height: 12),
+                      BankButton(
+                        'Кредитные заявки',
+                        outlined: true,
+                        onPressed: onApplications,
+                      ),
+                      const SizedBox(height: 12),
+                      BankButton(
+                        'Просроченные кредиты',
+                        outlined: true,
+                        color: bankRed,
+                        onPressed: onOverdue,
                       ),
                       const SizedBox(height: 12),
                       BankButton(
@@ -1622,6 +1697,7 @@ class StatCard extends StatelessWidget {
   final String sub;
   final bool isAccent;
   final bool isWarning;
+  final VoidCallback? onTap;
 
   const StatCard({
     super.key,
@@ -1630,11 +1706,12 @@ class StatCard extends StatelessWidget {
     required this.sub,
     this.isAccent = false,
     this.isWarning = false,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Panel(
+    final card = Panel(
       borderColor: isAccent
           ? bankBlue
           : isWarning
@@ -1669,6 +1746,17 @@ class StatCard extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+
+    if (onTap == null) return card;
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: card,
       ),
     );
   }
@@ -1959,6 +2047,11 @@ class ClientDetailsScreen extends StatelessWidget {
                       InfoLine('Продукты', client.products),
                       InfoLine('Баланс счёта', money(client.balance)),
                       InfoLine('Кредитная задолженность', money(client.debt)),
+                      InfoLine(
+                        'Статус карты',
+                        client.cardBlocked ? 'Заблокирована' : 'Активна',
+                        color: client.cardBlocked ? bankRed : bankGreen,
+                      ),
                       const Divider(height: 30),
                       const InfoLine(
                         'Последняя операция',
@@ -2039,7 +2132,11 @@ class AccountsCardsScreen extends StatelessWidget {
                     const DataCell(Text('Текущий счёт')),
                     const DataCell(Text('RUB')),
                     DataCell(Text(money(client.balance))),
-                    const DataCell(StatusBadge('Активен')),
+                    DataCell(
+                      StatusBadge(
+                        client.cardBlocked ? 'Заблокирована' : 'Активна',
+                      ),
+                    ),
                   ],
                 ),
               ],
@@ -2467,6 +2564,981 @@ class _CreateCreditApplicationScreenState
 }
 
 // ============================================================================
+// СПРАВКА О ДОХОДАХ — ФОРМА TRIBIT BANK
+// ============================================================================
+
+const certBankName = 'TriBit Bank';
+const certOrg = 'ООО «Трибит-Софт»';
+const certOrgAddress = 'г. Москва, ул. Тверская, 12';
+const certInn = '7701234567';
+const certPosition = 'Инженер-программист';
+const certHireDate = '01.03.2021';
+const certSnils = '123-456-789 01';
+const certRegAddress = 'г. Москва, ул. Ленина, 5, кв. 12';
+const certManager = 'Петров П.П.';
+const certAccountant = 'Сидорова С.С.';
+const certPhoneAccounting = '+7 (495) 200-00-01';
+const certPhoneHr = '+7 (495) 200-00-02';
+const certPhoneHome = '+7 (495) 200-00-03';
+const certPhoneMobile = '+7 (926) 600-00-04';
+const certDocName = 'Паспорт РФ';
+const certDocNumber = '45 12 345678';
+const certDocIssued = 'ОВД района Тверской г. Москвы, 15.04.2018';
+
+String certMoney(num value) {
+  final parts = value.toStringAsFixed(2).split('.');
+  final integer = parts[0].replaceAllMapped(
+    RegExp(r'(\d)(?=(\d{3})+(?!\d))'),
+    (m) => '${m[1]} ',
+  );
+  return '$integer,${parts[1]}';
+}
+
+const _certOnes = [
+  '', 'один', 'два', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь',
+  'девять', 'десять', 'одиннадцать', 'двенадцать', 'тринадцать',
+  'четырнадцать', 'пятнадцать', 'шестнадцать', 'семнадцать', 'восемнадцать',
+  'девятнадцать',
+];
+const _certOnesFem = [
+  '', 'одна', 'две', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь',
+  'девять', 'десять', 'одиннадцать', 'двенадцать', 'тринадцать',
+  'четырнадцать', 'пятнадцать', 'шестнадцать', 'семнадцать', 'восемнадцать',
+  'девятнадцать',
+];
+const _certTens = [
+  '', '', 'двадцать', 'тридцать', 'сорок', 'пятьдесят', 'шестьдесят',
+  'семьдесят', 'восемьдесят', 'девяносто',
+];
+const _certHundreds = [
+  '', 'сто', 'двести', 'триста', 'четыреста', 'пятьсот', 'шестьсот',
+  'семьсот', 'восемьсот', 'девятьсот',
+];
+
+String _certThree(int n, bool fem) {
+  final words = <String>[];
+  final h = n ~/ 100;
+  final t = (n ~/ 10) % 10;
+  final o = n % 10;
+  if (h > 0) words.add(_certHundreds[h]);
+  if (t == 1) {
+    words.add(fem ? _certOnesFem[10 + o] : _certOnes[10 + o]);
+  } else {
+    if (t > 1) words.add(_certTens[t]);
+    if (o > 0) words.add(fem ? _certOnesFem[o] : _certOnes[o]);
+  }
+  return words.join(' ');
+}
+
+String certAmountInWords(num value) {
+  final rub = value.floor();
+  final kop = ((value - rub) * 100).round();
+  if (rub == 0) {
+    return 'ноль рублей ${kop.toString().padLeft(2, '0')} копеек';
+  }
+  final millions = rub ~/ 1000000;
+  final thousands = (rub ~/ 1000) % 1000;
+  final rest = rub % 1000;
+  final parts = <String>[];
+  if (millions > 0) {
+    parts.add(_certThree(millions, false));
+    parts.add(plural(millions, 'миллион', 'миллиона', 'миллионов'));
+  }
+  if (thousands > 0) {
+    parts.add(_certThree(thousands, true));
+    parts.add(plural(thousands, 'тысяча', 'тысячи', 'тысяч'));
+  }
+  if (rest > 0) parts.add(_certThree(rest, false));
+  final rubWord = plural(rub, 'рубль', 'рубля', 'рублей');
+  return '${parts.join(' ')} $rubWord ${kop.toString().padLeft(2, '0')} копеек';
+}
+
+class CertMonthRow {
+  final String month;
+  final int year;
+  final double gross;
+  final double tax;
+  final double union;
+  final double exec;
+  final double pension;
+  final double other;
+  final double alimony;
+  final double net;
+
+  const CertMonthRow({
+    required this.month,
+    required this.year,
+    required this.gross,
+    required this.tax,
+    required this.union,
+    required this.exec,
+    required this.pension,
+    required this.other,
+    required this.alimony,
+    required this.net,
+  });
+
+  double get withheld => tax + union + exec + pension + other + alimony;
+}
+
+const _certMonthNames = [
+  'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+  'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
+];
+
+List<CertMonthRow> buildCertRows(List<double> gross, List<double> other) {
+  final now = DateTime.now();
+  return List.generate(3, (i) {
+    final d = DateTime(now.year, now.month - (3 - i), 1);
+    final g = gross[i];
+    final tax = double.parse((g * 0.13).toStringAsFixed(2));
+    final pension = double.parse((g * 0.01).toStringAsFixed(2));
+    final o = other[i];
+    final net = double.parse((g - tax - pension - o).toStringAsFixed(2));
+    return CertMonthRow(
+      month: _certMonthNames[d.month - 1],
+      year: d.year,
+      gross: g,
+      tax: tax,
+      union: 0,
+      exec: 0,
+      pension: pension,
+      other: o,
+      alimony: 0,
+      net: net,
+    );
+  });
+}
+
+List<CertMonthRow> defaultCertRows() =>
+    buildCertRows([2450, 2500, 2600], [0, 0, 0]);
+
+// ----------------------------------------------------------------------------
+// Бумажный предпросмотр справки (правая панель деталей заявки)
+// ----------------------------------------------------------------------------
+
+class IncomeCertificatePanel extends StatelessWidget {
+  final CreditApplication application;
+  final String employeeName;
+
+  const IncomeCertificatePanel({
+    super.key,
+    required this.application,
+    required this.employeeName,
+  });
+
+  Widget _line(String text,
+      {bool bold = false, double size = 9.5, TextAlign align = TextAlign.left}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3),
+      child: Text(
+        text,
+        textAlign: align,
+        style: TextStyle(
+          fontSize: size,
+          fontWeight: bold ? FontWeight.bold : FontWeight.normal,
+          color: Colors.black,
+          height: 1.3,
+        ),
+      ),
+    );
+  }
+
+  Widget _table(List<CertMonthRow> rows) {
+    Widget cell(String t, {bool bold = false, bool header = false}) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 4),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.black, width: 0.5),
+          color: header ? const Color(0xFFF2F2F2) : Colors.white,
+        ),
+        child: Text(
+          t,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 8,
+            fontWeight: bold || header ? FontWeight.bold : FontWeight.normal,
+            color: Colors.black,
+            height: 1.15,
+          ),
+        ),
+      );
+    }
+
+    TableRow tr(List<String> c, {bool bold = false, bool header = false}) {
+      return TableRow(
+        children: c.map((e) => cell(e, bold: bold, header: header)).toList(),
+      );
+    }
+
+    final totalGross = rows.fold<double>(0, (s, r) => s + r.gross);
+    final totalWithheld = rows.fold<double>(0, (s, r) => s + r.withheld);
+    final totalNet = rows.fold<double>(0, (s, r) => s + r.net);
+
+    return Table(
+      border: TableBorder.all(color: Colors.black, width: 0.5),
+      columnWidths: const {
+        0: FlexColumnWidth(1.4),
+        1: FlexColumnWidth(1.1),
+        2: FlexColumnWidth(1.1),
+        3: FlexColumnWidth(1.2),
+      },
+      children: [
+        tr(['Месяц', 'Доход', 'Удержано', 'К выплате'], header: true),
+        for (final r in rows)
+          tr([
+            '${r.month} ${r.year}',
+            certMoney(r.gross),
+            certMoney(r.withheld),
+            certMoney(r.net),
+          ]),
+        tr([
+          'ИТОГО',
+          certMoney(totalGross),
+          certMoney(totalWithheld),
+          certMoney(totalNet),
+        ], bold: true),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = defaultCertRows();
+    final avg = rows.fold<double>(0, (s, r) => s + r.net) / 3;
+    final client = application.client;
+
+    return Panel(
+      title: 'Справка о доходах',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border.all(color: const Color(0xFFCBD5E1)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.06),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: DefaultTextStyle(
+              style: const TextStyle(
+                fontFamily: 'Times New Roman',
+                color: Colors.black,
+                fontSize: 9.5,
+                height: 1.3,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _line(certOrg, bold: true, size: 9),
+                  _line('${dateText(DateTime.now())} № 14', size: 8.5),
+                  const SizedBox(height: 8),
+                  _line('СПРАВКА', bold: true, size: 13, align: TextAlign.center),
+                  _line(
+                    'для получения кредита',
+                    bold: true,
+                    size: 8.5,
+                    align: TextAlign.center,
+                  ),
+                  _line(
+                    'в «$certBankName»',
+                    bold: true,
+                    size: 8.5,
+                    align: TextAlign.center,
+                  ),
+                  const SizedBox(height: 8),
+                  _line('Выдана ${client.name}', bold: true),
+                  _line(
+                    'о том, что он(она) с $certHireDate работает в $certOrg, '
+                    '$certOrgAddress, ИНН $certInn, в должности $certPosition '
+                    'по трудовому договору на неопределенный срок.',
+                    size: 8.5,
+                  ),
+                  const SizedBox(height: 6),
+                  _line(
+                    'Среднемесячный доход за последние 3 месяца составляет: '
+                    '${certMoney(avg)} руб. (${certAmountInWords(avg)}).',
+                    bold: true,
+                    size: 8.5,
+                  ),
+                  const SizedBox(height: 8),
+                  _table(rows),
+                  const SizedBox(height: 8),
+                  _line('Предъявлен: $certDocName, $certDocNumber', size: 8.5),
+                  _line('выдан: $certDocIssued', size: 8.5),
+                  _line('СНИЛС: $certSnils', size: 8.5),
+                  _line('Зарегистрирован(а) по адресу: $certRegAddress', size: 8.5),
+                  const SizedBox(height: 8),
+                  _line('Руководитель ____________ $certManager', size: 8.5),
+                  _line('Главный бухгалтер ____________ $certAccountant', size: 8.5),
+                  const SizedBox(height: 4),
+                  _line('М.П.', bold: true, size: 8.5),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          BankButton(
+            'Открыть и заполнить справку',
+            outlined: true,
+            onPressed: () {
+              showDialog<void>(
+                context: context,
+                builder: (_) => IncomeCertificateDialog(
+                  application: application,
+                  employeeName: employeeName,
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Справка о доходах по форме $certBankName для получения кредита. '
+            'Данные работодателя и суммы можно изменить в полной форме, '
+            'после чего сохранить документ в .txt.',
+            style: TextStyle(fontSize: 10, color: bankGrey, height: 1.5),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Полная редактируемая форма справки + сохранение
+// ----------------------------------------------------------------------------
+
+class IncomeCertificateDialog extends StatefulWidget {
+  final CreditApplication application;
+  final String employeeName;
+
+  const IncomeCertificateDialog({
+    super.key,
+    required this.application,
+    required this.employeeName,
+  });
+
+  @override
+  State<IncomeCertificateDialog> createState() =>
+      _IncomeCertificateDialogState();
+}
+
+class _IncomeCertificateDialogState extends State<IncomeCertificateDialog> {
+  final _org = TextEditingController(text: certOrg);
+  final _orgAddress = TextEditingController(text: certOrgAddress);
+  final _inn = TextEditingController(text: certInn);
+  final _position = TextEditingController(text: certPosition);
+  final _hireDate = TextEditingController(text: certHireDate);
+  final _contractEnd = TextEditingController(text: '');
+  final _docName = TextEditingController(text: certDocName);
+  final _docNumber = TextEditingController(text: certDocNumber);
+  final _docIssued = TextEditingController(text: certDocIssued);
+  final _snils = TextEditingController(text: certSnils);
+  final _regAddress = TextEditingController(text: certRegAddress);
+  final _manager = TextEditingController(text: certManager);
+  final _accountant = TextEditingController(text: certAccountant);
+  final _phoneAccounting = TextEditingController(text: certPhoneAccounting);
+  final _phoneHr = TextEditingController(text: certPhoneHr);
+  final _phoneHome = TextEditingController(text: certPhoneHome);
+  final _phoneMobile = TextEditingController(text: certPhoneMobile);
+  final _certNumber = TextEditingController(text: '14');
+  final _certDate = TextEditingController(text: dateText(DateTime.now()));
+
+  final _gross = List.generate(
+    3,
+    (i) => TextEditingController(text: ['2450', '2500', '2600'][i]),
+  );
+  final _other = List.generate(3, (i) => TextEditingController(text: '0'));
+
+  bool _saving = false;
+  String? _savedPath;
+  String? _error;
+
+  @override
+  void dispose() {
+    for (final c in [
+      _org, _orgAddress, _inn, _position, _hireDate, _contractEnd,
+      _docName, _docNumber, _docIssued, _snils, _regAddress,
+      _manager, _accountant, _phoneAccounting, _phoneHr, _phoneHome,
+      _phoneMobile, _certNumber, _certDate,
+    ]) {
+      c.dispose();
+    }
+    for (final c in [..._gross, ..._other]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  double _parse(TextEditingController c) =>
+      double.tryParse(c.text.trim().replaceAll(' ', '').replaceAll(',', '.')) ??
+      0;
+
+  List<CertMonthRow> _rows() => buildCertRows(
+        _gross.map(_parse).toList(),
+        _other.map(_parse).toList(),
+      );
+
+  String _contractText() {
+    final end = _contractEnd.text.trim();
+    if (end.isEmpty) {
+      return 'по трудовому договору на неопределенный срок';
+    }
+    return 'по срочному трудовому договору сроком действия до $end';
+  }
+
+  String _buildText() {
+    final rows = _rows();
+    final totalGross = rows.fold<double>(0, (s, r) => s + r.gross);
+    final totalTax = rows.fold<double>(0, (s, r) => s + r.tax);
+    final totalPension = rows.fold<double>(0, (s, r) => s + r.pension);
+    final totalOther = rows.fold<double>(0, (s, r) => s + r.other);
+    final totalNet = rows.fold<double>(0, (s, r) => s + r.net);
+    final avg = totalNet / 3;
+    final client = widget.application.client;
+    final b = StringBuffer();
+
+    String pad(String s, int w) =>
+        s.length >= w ? s.substring(0, w) : s.padRight(w);
+    String line() => '-' * 118;
+
+    b.writeln(pad(_org.text, 60));
+    b.writeln('${_certDate.text} № ${_certNumber.text}');
+    b.writeln('Тел. бухгалтерии: ${_phoneAccounting.text}');
+    b.writeln('Тел. отдела кадров: ${_phoneHr.text}');
+    b.writeln('Тел. домашний: ${_phoneHome.text}');
+    b.writeln('Тел. мобильный: ${_phoneMobile.text}');
+    b.writeln('');
+    b.writeln('                              СПРАВКА');
+    b.writeln('                     для получения кредита');
+    b.writeln('                       в «$certBankName»');
+    b.writeln('');
+    b.writeln('Выдана ${client.name}');
+    b.writeln('о том, что он(она) с ${_hireDate.text} работает в');
+    b.writeln('${_org.text}, ${_orgAddress.text}, ИНН ${_inn.text}');
+    b.writeln('в должности ${_position.text}, ${_contractText()}.');
+    b.writeln('');
+    b.writeln('Среднемесячный доход за последние 3 месяца составляет:');
+    b.writeln('${certMoney(avg)} руб. (${certAmountInWords(avg)})');
+    b.writeln('');
+    b.writeln(line());
+    b.writeln(
+      '${pad('Месяц', 12)}${pad('Год', 6)}${pad('Доход', 12)}'
+      '${pad('НДФЛ', 10)}${pad('Проф.', 8)}${pad('Исполн.', 9)}'
+      '${pad('Пенс.', 9)}${pad('Другие', 9)}${pad('Алименты', 10)}'
+      '${pad('К выплате', 12)}',
+    );
+    b.writeln(line());
+    for (final r in rows) {
+      b.writeln(
+        '${pad(r.month, 12)}${pad(r.year.toString(), 6)}'
+        '${pad(certMoney(r.gross), 12)}${pad(certMoney(r.tax), 10)}'
+        '${pad(certMoney(r.union), 8)}${pad(certMoney(r.exec), 9)}'
+        '${pad(certMoney(r.pension), 9)}${pad(certMoney(r.other), 9)}'
+        '${pad(certMoney(r.alimony), 10)}${pad(certMoney(r.net), 12)}',
+      );
+    }
+    b.writeln(line());
+    b.writeln(
+      '${pad('ИТОГО', 18)}${pad(certMoney(totalGross), 12)}'
+      '${pad(certMoney(totalTax), 10)}${pad('0,00', 8)}${pad('0,00', 9)}'
+      '${pad(certMoney(totalPension), 9)}${pad(certMoney(totalOther), 9)}'
+      '${pad('0,00', 10)}${pad(certMoney(totalNet), 12)}',
+    );
+    b.writeln(line());
+    b.writeln('');
+    b.writeln('Предъявлен: ${_docName.text}, ${_docNumber.text},');
+    b.writeln('выдан: ${_docIssued.text}');
+    b.writeln('СНИЛС: ${_snils.text}');
+    b.writeln('Зарегистрирован(а) по адресу: ${_regAddress.text}');
+    b.writeln('');
+    b.writeln('Руководитель ______________ ${_manager.text}');
+    b.writeln('Главный бухгалтер ______________ ${_accountant.text}');
+    b.writeln('');
+    b.writeln('М.П.');
+    b.writeln('');
+    b.writeln('Примечания:');
+    b.writeln('1. Указываются сведения за 3 календарных месяца до месяца обращения.');
+    b.writeln('2. Справка выдается кредитополучателю по месту работы (службы, учебы).');
+    b.writeln('3. Справка о доходах индивидуальных предпринимателей составляется');
+    b.writeln('   самим индивидуальным предпринимателем.');
+    b.writeln('');
+    b.writeln('Форма $certBankName. Документ сформирован в TriBit Bank Portal');
+    b.writeln('по заявке ${widget.application.id}.');
+    b.writeln('Сформировал: ${widget.employeeName}');
+    return b.toString();
+  }
+
+  Future<void> _save() async {
+    if (_saving) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+
+    final text = _buildText();
+    final now = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    final fileName =
+        'Spravka_${widget.application.client.id}'
+        '_${now.year}-${two(now.month)}-${two(now.day)}.txt';
+    final sep = Platform.pathSeparator;
+    final userRoot = Platform.environment['USERPROFILE'] ??
+        Platform.environment['HOME'] ??
+        Directory.current.path;
+
+    final candidates = <Directory>[
+      Directory('$userRoot${sep}Documents${sep}TriBitBankReports'),
+      Directory('${Directory.current.path}${sep}TriBitBankReports'),
+      Directory('${Directory.systemTemp.path}${sep}TriBitBankReports'),
+    ];
+
+    File? savedFile;
+    for (final dir in candidates) {
+      try {
+        await dir.create(recursive: true);
+        final file = File('${dir.path}$sep$fileName');
+        await file.writeAsString(text, flush: true);
+        savedFile = file;
+        break;
+      } catch (_) {
+        continue;
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _saving = false;
+      if (savedFile != null) {
+        _savedPath = savedFile.path;
+      } else {
+        _error = 'Не удалось сохранить справку ни в одну из папок.';
+      }
+    });
+  }
+
+  Widget _field(String label, TextEditingController c, {int flex = 1}) {
+    return Expanded(
+      flex: flex,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: TextField(
+          controller: c,
+          onChanged: (_) => setState(() {}),
+          style: const TextStyle(fontSize: 12),
+          decoration: InputDecoration(
+            labelText: label,
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 10,
+              vertical: 10,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _editor() {
+    return SizedBox(
+      width: 330,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.only(right: 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Реквизиты справки',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [_field('Организация', _org)]),
+            Row(children: [_field('Адрес организации', _orgAddress)]),
+            Row(children: [
+              _field('ИНН', _inn),
+              const SizedBox(width: 8),
+              _field('№ справки', _certNumber),
+            ]),
+            Row(children: [
+              _field('Дата справки', _certDate),
+              const SizedBox(width: 8),
+              _field('Должность', _position),
+            ]),
+            Row(children: [
+              _field('Дата приёма', _hireDate),
+              const SizedBox(width: 8),
+              _field('Срок договора (пусто = бессрочный)', _contractEnd),
+            ]),
+            const SizedBox(height: 6),
+            const Text(
+              'Документ клиента',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [
+              _field('Документ', _docName),
+              const SizedBox(width: 8),
+              _field('Номер', _docNumber),
+            ]),
+            Row(children: [_field('Кем выдан', _docIssued)]),
+            Row(children: [_field('СНИЛС', _snils)]),
+            Row(children: [_field('Адрес регистрации', _regAddress)]),
+            const SizedBox(height: 6),
+            const Text(
+              'Подписи и телефоны',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [_field('Руководитель', _manager)]),
+            Row(children: [_field('Главный бухгалтер', _accountant)]),
+            Row(children: [
+              _field('Тел. бухгалтерии', _phoneAccounting),
+              const SizedBox(width: 8),
+              _field('Тел. кадров', _phoneHr),
+            ]),
+            Row(children: [
+              _field('Тел. домашний', _phoneHome),
+              const SizedBox(width: 8),
+              _field('Тел. мобильный', _phoneMobile),
+            ]),
+            const SizedBox(height: 6),
+            const Text(
+              'Доход за 3 месяца, руб.',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'НДФЛ 13% и пенсионные 1% считаются автоматически.',
+              style: TextStyle(fontSize: 10, color: bankGrey),
+            ),
+            const SizedBox(height: 10),
+            for (int i = 0; i < 3; i++)
+              Row(
+                children: [
+                  SizedBox(
+                    width: 86,
+                    child: Text(
+                      _rows()[i].month,
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+                  _field('Доход', _gross[i]),
+                  const SizedBox(width: 8),
+                  _field('Другие удержания', _other[i]),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _docLine(String text, {bool bold = false, double size = 11}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: size,
+          fontWeight: bold ? FontWeight.bold : FontWeight.normal,
+          color: Colors.black,
+          height: 1.35,
+        ),
+      ),
+    );
+  }
+
+  Widget _docTable(List<CertMonthRow> rows) {
+    final totalGross = rows.fold<double>(0, (s, r) => s + r.gross);
+    final totalTax = rows.fold<double>(0, (s, r) => s + r.tax);
+    final totalPension = rows.fold<double>(0, (s, r) => s + r.pension);
+    final totalOther = rows.fold<double>(0, (s, r) => s + r.other);
+    final totalNet = rows.fold<double>(0, (s, r) => s + r.net);
+
+    Widget cell(String t, {bool bold = false, bool header = false}) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.black, width: 0.6),
+          color: header ? const Color(0xFFF2F2F2) : Colors.white,
+        ),
+        child: Text(
+          t,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 8.5,
+            fontWeight: bold || header ? FontWeight.bold : FontWeight.normal,
+            color: Colors.black,
+            height: 1.2,
+          ),
+        ),
+      );
+    }
+
+    TableRow row(List<String> cells, {bool bold = false, bool header = false}) {
+      return TableRow(
+        children: cells.map((c) => cell(c, bold: bold, header: header)).toList(),
+      );
+    }
+
+    return Table(
+      border: TableBorder.all(color: Colors.black, width: 0.6),
+      columnWidths: const {
+        0: FlexColumnWidth(1.5),
+        1: FlexColumnWidth(0.8),
+        2: FlexColumnWidth(1.4),
+        3: FlexColumnWidth(1.2),
+        4: FlexColumnWidth(1.1),
+        5: FlexColumnWidth(1.2),
+        6: FlexColumnWidth(1.1),
+        7: FlexColumnWidth(1.1),
+        8: FlexColumnWidth(1.2),
+        9: FlexColumnWidth(1.4),
+      },
+      children: [
+        row([
+          'Месяц', 'Год', 'Размер дохода',
+          'НДФЛ', 'Профсоюзные взносы',
+          'По исполнительным документам', 'Пенсионные взносы',
+          'Другие удержания', 'Алименты / кредиты', 'К выплате',
+        ], header: true),
+        for (final r in rows)
+          row([
+            r.month, r.year.toString(), certMoney(r.gross),
+            certMoney(r.tax), certMoney(r.union), certMoney(r.exec),
+            certMoney(r.pension), certMoney(r.other), certMoney(r.alimony),
+            certMoney(r.net),
+          ]),
+        row([
+          'ИТОГО', '', certMoney(totalGross), certMoney(totalTax), '0,00',
+          '0,00', certMoney(totalPension), certMoney(totalOther), '0,00',
+          certMoney(totalNet),
+        ], bold: true),
+      ],
+    );
+  }
+
+  Widget _preview() {
+    final rows = _rows();
+    final avg = rows.fold<double>(0, (s, r) => s + r.net) / 3;
+    final client = widget.application.client;
+
+    return Container(
+      color: const Color(0xFFE8E8E8),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(18),
+        child: Center(
+          child: Container(
+            width: 760,
+            padding: const EdgeInsets.symmetric(horizontal: 42, vertical: 34),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.18),
+                  blurRadius: 14,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: DefaultTextStyle(
+              style: const TextStyle(
+                fontFamily: 'Times New Roman',
+                color: Colors.black,
+                fontSize: 11,
+                height: 1.35,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _docLine(_org.text, bold: true),
+                            _docLine('${_certDate.text} № ${_certNumber.text}'),
+                          ],
+                        ),
+                      ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _docLine('Тел. бухгалтерии: ${_phoneAccounting.text}', size: 9),
+                          _docLine('Тел. отдела кадров: ${_phoneHr.text}', size: 9),
+                          _docLine('Тел. домашний: ${_phoneHome.text}', size: 9),
+                          _docLine('Тел. мобильный: ${_phoneMobile.text}', size: 9),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  Center(
+                    child: Column(
+                      children: [
+                        _docLine('СПРАВКА', bold: true, size: 15),
+                        _docLine('для получения кредита', bold: true, size: 11),
+                        _docLine('в «$certBankName»', bold: true, size: 11),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _docLine('Выдана ${client.name}', bold: true),
+                  _docLine(
+                    'о том, что он(она) с ${_hireDate.text} работает в '
+                    '${_org.text}, ${_orgAddress.text}, ИНН ${_inn.text}, '
+                    'в должности ${_position.text}, ${_contractText()}.',
+                  ),
+                  const SizedBox(height: 10),
+                  _docLine(
+                    'Среднемесячный доход за последние 3 месяца составляет: '
+                    '${certMoney(avg)} руб. (${certAmountInWords(avg)}).',
+                    bold: true,
+                  ),
+                  const SizedBox(height: 12),
+                  _docTable(rows),
+                  const SizedBox(height: 14),
+                  _docLine(
+                    'Предъявлен: ${_docName.text}, ${_docNumber.text}, '
+                    'выдан: ${_docIssued.text}.',
+                  ),
+                  _docLine('СНИЛС: ${_snils.text}'),
+                  _docLine('Зарегистрирован(а) по адресу: ${_regAddress.text}'),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(child: _docLine('Руководитель')),
+                      Expanded(
+                        child: Container(
+                          height: 1,
+                          color: Colors.black,
+                          margin: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                      ),
+                      Expanded(child: _docLine(_manager.text)),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(child: _docLine('Главный бухгалтер')),
+                      Expanded(
+                        child: Container(
+                          height: 1,
+                          color: Colors.black,
+                          margin: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                      ),
+                      Expanded(child: _docLine(_accountant.text)),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _docLine('М.П.', bold: true),
+                  const SizedBox(height: 14),
+                  _docLine('Примечания:', bold: true, size: 9),
+                  _docLine(
+                    '1. Указываются сведения за 3 календарных месяца до месяца обращения.',
+                    size: 8.5,
+                  ),
+                  _docLine(
+                    '2. Справка выдается кредитополучателю по месту работы (службы, учебы).',
+                    size: 8.5,
+                  ),
+                  _docLine(
+                    '3. Справка о доходах индивидуальных предпринимателей составляется '
+                    'самим индивидуальным предпринимателем.',
+                    size: 8.5,
+                  ),
+                  const SizedBox(height: 10),
+                  _docLine(
+                    'Форма $certBankName • Сформировано в TriBit Bank Portal '
+                    'по заявке ${widget.application.id} • ${widget.employeeName}',
+                    size: 8,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Row(
+        children: [
+          const Icon(Icons.description_outlined, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Справка о доходах • ${widget.application.client.name}',
+              style: const TextStyle(fontSize: 16),
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 1150,
+        height: 640,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _editor(),
+                  const VerticalDivider(width: 1),
+                  const SizedBox(width: 12),
+                  Expanded(child: _preview()),
+                ],
+              ),
+            ),
+            if (_savedPath != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(
+                  'Сохранено: $_savedPath',
+                  style: const TextStyle(fontSize: 11, color: bankGreen),
+                ),
+              ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(
+                  _error!,
+                  style: const TextStyle(fontSize: 11, color: bankRed),
+                ),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : _save,
+          child: Text(_saving ? 'Сохранение…' : 'Сохранить .txt'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Закрыть'),
+        ),
+      ],
+    );
+  }
+}
+
+// ============================================================================
 // ДЕТАЛИ КРЕДИТНОЙ ЗАЯВКИ
 // ============================================================================
 
@@ -2547,28 +3619,10 @@ class CreditApplicationDetailsScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 20),
-          const Expanded(
-            child: Panel(
-              title: 'Проверки и скоринг',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  InfoLine('Проверка паспорта', 'Не подключена'),
-                  InfoLine('Кредитная история', 'Не подключена'),
-                  InfoLine('Проверка дохода', 'Не подключена'),
-                  InfoLine('Проверка СБ', 'Не подключена'),
-                  SizedBox(height: 18),
-                  Text(
-                    'В этом прототипе внешние проверки '
-                    'клиента не выполняются.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: bankGrey,
-                      height: 1.6,
-                    ),
-                  ),
-                ],
-              ),
+          Expanded(
+            child: IncomeCertificatePanel(
+              application: application,
+              employeeName: employeeName,
             ),
           ),
         ],
@@ -2578,208 +3632,143 @@ class CreditApplicationDetailsScreen extends StatelessWidget {
 }
 
 // ============================================================================
-// ПОГАШЕНИЕ КРЕДИТА
+// ПРОСРОЧЕННЫЕ КРЕДИТЫ
 // ============================================================================
 
-class CreditRepaymentScreen extends StatefulWidget {
-  final BankClient client;
+class OverdueLoansScreen extends StatefulWidget {
   final List<BankClient> clients;
-  final ValueChanged<BankClient> onClientChanged;
-  final Future<bool> Function(double amount) onPay;
+  final ValueChanged<BankClient> onOpenClient;
+  final ValueChanged<BankClient> onRemind;
 
-  const CreditRepaymentScreen({
+  const OverdueLoansScreen({
     super.key,
-    required this.client,
     required this.clients,
-    required this.onClientChanged,
-    required this.onPay,
+    required this.onOpenClient,
+    required this.onRemind,
   });
 
   @override
-  State<CreditRepaymentScreen> createState() => _CreditRepaymentScreenState();
+  State<OverdueLoansScreen> createState() => _OverdueLoansScreenState();
 }
 
-class _CreditRepaymentScreenState extends State<CreditRepaymentScreen> {
-  final formKey = GlobalKey<FormState>();
-  final amountController = TextEditingController(text: '12500');
-
-  bool fullRepayment = false;
-  bool processing = false;
-  double? lastPayment;
-
-  @override
-  void dispose() {
-    amountController.dispose();
-    super.dispose();
-  }
-
-  double? get amount => double.tryParse(
-    amountController.text.replaceAll(' ', '').replaceAll(',', '.'),
-  );
-
-  Future<void> pay() async {
-    if (!formKey.currentState!.validate()) return;
-
-    final payment = amount!;
-    setState(() => processing = true);
-
-    final success = await widget.onPay(payment);
-
-    if (!mounted) return;
-
-    setState(() {
-      processing = false;
-
-      if (success) {
-        lastPayment = payment;
-        if (fullRepayment) {
-          amountController.text = widget.client.debt.toStringAsFixed(2);
-        }
-      }
-    });
-  }
+class _OverdueLoansScreenState extends State<OverdueLoansScreen> {
+  String query = '';
 
   @override
   Widget build(BuildContext context) {
+    final overdue = widget.clients.where((client) => client.debt > 0).toList();
+    final totalDebt = overdue.fold<double>(0, (sum, client) => sum + client.debt);
+
+    final filtered = overdue.where((client) {
+      final text = 'CR-${client.id} ${client.id} ${client.name} ${client.phone}'
+          .toLowerCase();
+      return text.contains(query.trim().toLowerCase());
+    }).toList();
+
     return PageLayout(
-      title: 'Погашение кредита',
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      title: 'Просроченные кредиты',
+      child: Column(
         children: [
-          Expanded(
-            flex: 2,
-            child: Panel(
-              title: 'Оформление платежа',
-              child: Form(
-                key: formKey,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    FieldLabel(
-                      label: 'Клиент',
-                      child: DropdownButtonFormField<BankClient>(
-                        value: widget.client,
-                        isExpanded: true,
-                        items: widget.clients.map((client) {
-                          return DropdownMenuItem(
-                            value: client,
-                            child: Text(
-                              client.name,
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          );
-                        }).toList(),
-                        onChanged: processing
-                            ? null
-                            : (client) {
-                                if (client != null) {
-                                  widget.onClientChanged(client);
-                                }
-                              },
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    InfoLine('Договор', 'CR-${widget.client.id}'),
-                    InfoLine('Доступно на счёте', money(widget.client.balance)),
-                    InfoLine('Остаток долга', money(widget.client.debt)),
-                    const SizedBox(height: 12),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text(
-                        'Полное погашение',
-                        style: TextStyle(fontSize: 13),
-                      ),
-                      value: fullRepayment,
-                      onChanged: processing
-                          ? null
-                          : (value) {
-                              setState(() {
-                                fullRepayment = value;
-                                amountController.text = value
-                                    ? widget.client.debt.toStringAsFixed(2)
-                                    : '12500';
-                              });
-                            },
-                    ),
-                    const SizedBox(height: 14),
-                    FieldLabel(
-                      label: 'Сумма платежа, ₽',
-                      child: TextFormField(
-                        controller: amountController,
-                        readOnly: fullRepayment || processing,
-                        keyboardType:
-                            const TextInputType.numberWithOptions(
-                          decimal: true,
-                        ),
-                        validator: (_) {
-                          final value = amount;
-
-                          if (value == null ||
-                              !value.isFinite ||
-                              value <= 0) {
-                            return 'Введите положительную сумму';
-                          }
-
-                          if (value > widget.client.balance) {
-                            return 'Недостаточно средств';
-                          }
-
-                          if (value > widget.client.debt) {
-                            return 'Сумма больше остатка долга';
-                          }
-
-                          if ((value * 100 - (value * 100).round()).abs() >
-                              0.000001) {
-                            return 'Не больше двух знаков после запятой';
-                          }
-
-                          return null;
-                        },
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: BankButton(
-                        processing ? 'Обработка...' : 'Провести платёж',
-                        onPressed:
-                            processing || widget.client.debt <= 0 ? null : pay,
-                      ),
-                    ),
-                  ],
+          Row(
+            children: [
+              Expanded(
+                child: StatCard(
+                  title: 'ПРОСРОЧЕННЫХ ДОГОВОРОВ',
+                  value: '${overdue.length}',
+                  sub: 'Требуется связь с клиентом',
+                  isWarning: true,
                 ),
               ),
-            ),
-          ),
-          const SizedBox(width: 20),
-          Expanded(
-            child: Panel(
-              title: lastPayment == null
-                  ? 'Информация по кредиту'
-                  : '✓ Платёж успешно проведён',
-              borderColor: lastPayment == null
-                  ? null
-                  : const Color(0xFFA7F3D0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  StatusBadge(
-                    widget.client.debt <= 0 ? 'Погашен' : 'Действующий',
-                    color: bankGreen,
-                  ),
-                  const SizedBox(height: 16),
-                  InfoLine('Клиент', widget.client.name),
-                  InfoLine('Договор', 'CR-${widget.client.id}'),
-                  InfoLine('Остаток долга', money(widget.client.debt)),
-                  if (lastPayment != null)
-                    InfoLine(
-                      'Последний платёж',
-                      money(lastPayment!),
-                      color: bankGreen,
-                    ),
-                  const InfoLine('Комиссия в демо', '₽ 0,00'),
-                ],
+              const SizedBox(width: 16),
+              Expanded(
+                child: StatCard(
+                  title: 'СУММА ЗАДОЛЖЕННОСТИ',
+                  value: money(totalDebt),
+                  sub: 'По данным кредитных договоров БД',
+                  isAccent: true,
+                ),
               ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          Panel(
+            title: 'Список просроченных кредитов',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  onChanged: (value) => setState(() => query = value),
+                  decoration: const InputDecoration(
+                    hintText: 'Номер договора, ID или ФИО клиента',
+                    prefixIcon: Icon(Icons.search, size: 20),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                BankTable(
+                  columns: const [
+                    'ДОГОВОР',
+                    'КЛИЕНТ',
+                    'ТЕЛЕФОН',
+                    'ОСТАТОК ДОЛГА',
+                    'СТАТУС',
+                    'ДЕЙСТВИЕ',
+                  ],
+                  rows: filtered.map((client) {
+                    return DataRow(
+                      onSelectChanged: (_) => widget.onOpenClient(client),
+                      cells: [
+                        DataCell(
+                          Text(
+                            'CR-${client.id}',
+                            style: const TextStyle(color: bankBlue),
+                          ),
+                        ),
+                        DataCell(Text(client.name)),
+                        DataCell(Text(client.phone)),
+                        DataCell(
+                          Text(
+                            money(client.debt),
+                            style: const TextStyle(
+                              color: bankRed,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const DataCell(StatusBadge('Просрочен')),
+                        DataCell(
+                          TextButton.icon(
+                            icon: const Icon(
+                              Icons.notifications_active_outlined,
+                              size: 16,
+                              color: bankRed,
+                            ),
+                            label: const Text(
+                              'Напомнить',
+                              style: TextStyle(fontSize: 11, color: bankRed),
+                            ),
+                            onPressed: () => widget.onRemind(client),
+                          ),
+                        ),
+                      ],
+                    );
+                  }).toList(),
+                ),
+                if (filtered.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(25),
+                    child: Text(
+                      'Просроченных кредитов не найдено',
+                      style: TextStyle(color: bankGrey),
+                    ),
+                  ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Демо-режим: просрочкой считается любой непогашенный кредит. '
+                  'График платежей и даты просрочки не подключены. '
+                  'Клик по строке открывает карточку клиента.',
+                  style: TextStyle(fontSize: 11, color: bankGrey, height: 1.6),
+                ),
+              ],
             ),
           ),
         ],
@@ -2794,12 +3783,10 @@ class _CreditRepaymentScreenState extends State<CreditRepaymentScreen> {
 
 class ActionLogScreen extends StatefulWidget {
   final List<BankLog> logs;
-  final String employeeName;
 
   const ActionLogScreen({
     super.key,
     required this.logs,
-    required this.employeeName,
   });
 
   @override
@@ -2812,7 +3799,7 @@ class _ActionLogScreenState extends State<ActionLogScreen> {
   @override
   Widget build(BuildContext context) {
     final filtered = widget.logs.where((log) {
-      return '${log.action} ${log.object}'
+      return '${log.action} ${log.object} ${log.employeeId ?? ''}'
           .toLowerCase()
           .contains(query.toLowerCase());
     }).toList();
@@ -2826,7 +3813,7 @@ class _ActionLogScreenState extends State<ActionLogScreen> {
             TextField(
               onChanged: (value) => setState(() => query = value),
               decoration: const InputDecoration(
-                hintText: 'Поиск по действию или объекту',
+                hintText: 'Поиск по действию, объекту или ID сотрудника',
                 prefixIcon: Icon(Icons.search, size: 20),
               ),
             ),
@@ -2843,7 +3830,7 @@ class _ActionLogScreenState extends State<ActionLogScreen> {
                 return DataRow(
                   cells: [
                     DataCell(Text(timeText(log.date))),
-                    DataCell(Text(widget.employeeName)),
+                    DataCell(Text('ID ${log.employeeId ?? '—'}')),
                     DataCell(Text(log.action)),
                     DataCell(Text(log.object)),
                     const DataCell(StatusBadge('Успешно')),
@@ -2870,11 +3857,13 @@ class _ActionLogScreenState extends State<ActionLogScreen> {
 class SettingsScreen extends StatefulWidget {
   final String employeeName;
   final String employeePosition;
+  final String employeeId;
   final bool emailNotifications;
   final bool applicationNotifications;
   final void Function(bool email, bool applications) onSave;
   const SettingsScreen({super.key, required this.employeeName,
-    required this.employeePosition, required this.emailNotifications,
+    required this.employeePosition, required this.employeeId,
+    required this.emailNotifications,
     required this.applicationNotifications, required this.onSave});
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -3088,11 +4077,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 6),
             Text(widget.employeePosition, style: const TextStyle(color: bankGrey, fontSize: 12)),
             const SizedBox(height: 5),
-            Text('Логин: ${workplace.login}', style: const TextStyle(color: bankGrey, fontSize: 11)),
+            Text('ID: ${widget.employeeId} • Логин: ${workplace.login}',
+              style: const TextStyle(color: bankGrey, fontSize: 11)),
           ])),
         ]),
         const SizedBox(height: 16),
         const Divider(height: 1), const SizedBox(height: 12),
+        InfoLine('ID сотрудника', widget.employeeId),
         InfoLine('Телефон', value('phone')), InfoLine('E-mail', value('email')),
         const SizedBox(height: 12),
         Wrap(spacing: 8, runSpacing: 8, children: [
